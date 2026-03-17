@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use serde_json::Value;
 
 use ready::execution::observer::LoggingObserver;
 use ready::llm::client::OpenAiClient;
@@ -80,8 +81,14 @@ enum Commands {
         plans_dir: Option<String>,
         #[arg(long, help = "LLM model name to use when planning from an SOP.")]
         model: Option<String>,
+        #[arg(
+            long = "input",
+            value_name = "NAME=VALUE",
+            help = "Pre-fill a plan input variable. May be repeated. VALUE accepts JSON, or plain text if JSON parsing fails."
+        )]
+        inputs: Vec<String>,
     },
-    /// Display a human-readable summary of a previously generated plan.
+    /// Display a human-readable summary of a previously generated plan, including prefillable inputs.
     Inspect {
         #[arg(long, help = "Path to the plan JSON file to inspect.")]
         plan: String,
@@ -134,6 +141,7 @@ async fn run() -> Result<()> {
             tools,
             plans_dir,
             model,
+            inputs,
         } => {
             handle_run(
                 sop.as_deref(),
@@ -141,6 +149,7 @@ async fn run() -> Result<()> {
                 tools.as_deref(),
                 plans_dir.as_deref(),
                 model,
+                &inputs,
             )
             .await
         }
@@ -177,6 +186,7 @@ async fn handle_run(
     tools_path: Option<&str>,
     plans_dir: Option<&str>,
     model: Option<String>,
+    inputs: &[String],
 ) -> Result<()> {
     let llm = Arc::new(OpenAiClient::new(model, None, None));
     let registry = Arc::new(build_registry(llm.clone(), tools_path, plans_dir)?);
@@ -195,9 +205,12 @@ async fn handle_run(
         }
     };
 
+    let initial_inputs = parse_prefilled_inputs(inputs)?;
+    validate_prefilled_inputs(&plan, &initial_inputs)?;
+
     let executor = SopExecutor::new(registry, Some(Arc::new(LoggingObserver)));
     let state = executor
-        .execute(&plan, HashMap::new(), Some(Box::new(prompt_for_input)))
+        .execute(&plan, initial_inputs, Some(Box::new(prompt_for_input)))
         .await?;
 
     println!("Execution finished with status: {:?}", state.status);
@@ -215,6 +228,7 @@ async fn handle_run(
 fn handle_inspect(plan_path: &str) -> Result<()> {
     let plan = load_plan(Path::new(plan_path))?;
     print!("{}", format_plan(&plan));
+    print_prefillable_inputs(&plan);
     Ok(())
 }
 
@@ -283,6 +297,81 @@ fn default_plan_output_path(sop_path: &Path) -> PathBuf {
 fn load_plan(path: &Path) -> Result<AbstractPlan> {
     let content = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&content)?)
+}
+
+fn parse_prefilled_inputs(inputs: &[String]) -> Result<HashMap<String, Value>> {
+    let mut parsed = HashMap::new();
+
+    for input in inputs {
+        let (name, raw_value) = input.split_once('=').ok_or_else(|| {
+            ReadyError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid --input '{input}'. Expected NAME=VALUE."),
+            ))
+        })?;
+
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ReadyError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid --input '{input}'. Input name cannot be empty."),
+            )));
+        }
+
+        let value = parse_input_value(raw_value);
+        parsed.insert(name.to_string(), value);
+    }
+
+    Ok(parsed)
+}
+
+fn validate_prefilled_inputs(plan: &AbstractPlan, cli_inputs: &HashMap<String, Value>) -> Result<()> {
+    let prefillable_inputs = plan.prefillable_inputs();
+    let available_inputs = prefillable_inputs
+        .iter()
+        .map(|input| input.variable_name.as_str())
+        .collect::<Vec<_>>();
+
+    for input_name in cli_inputs.keys() {
+        if !available_inputs.iter().any(|name| name == input_name) {
+            let known_inputs = if available_inputs.is_empty() {
+                "none".to_string()
+            } else {
+                available_inputs.join(", ")
+            };
+            return Err(ReadyError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Unknown prefillable input '{input_name}'. Available prefillable inputs: {known_inputs}."
+                ),
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_input_value(raw_value: &str) -> Value {
+    serde_json::from_str(raw_value).unwrap_or_else(|_| Value::String(raw_value.to_string()))
+}
+
+fn print_prefillable_inputs(plan: &AbstractPlan) {
+    println!("\n--- Prefillable Inputs ---");
+    for line in prefillable_input_lines(plan) {
+        println!("{line}");
+    }
+}
+
+fn prefillable_input_lines(plan: &AbstractPlan) -> Vec<String> {
+    let inputs = plan.prefillable_inputs();
+    if inputs.is_empty() {
+        return vec!["  (none)".to_string()];
+    }
+
+    inputs
+        .into_iter()
+        .map(|input| format!("  --input {}=<value>  # {}", input.variable_name, input.prompt))
+        .collect()
 }
 
 fn prompt_for_input(prompt: &str) -> Option<String> {
