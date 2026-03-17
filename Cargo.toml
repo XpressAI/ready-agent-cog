@@ -1,0 +1,32 @@
+[package]
+name = "ready-agent-cog"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "ready"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ready"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustpython-parser = "0.4"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+tokio = { version = "1", features = ["full"] }
+
+[[bench]]
+name = "hanoi_stress"
+harness = false
