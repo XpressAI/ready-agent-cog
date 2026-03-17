@@ -277,6 +277,57 @@ Minimal [`shell-tools.json`](src/tools/shell.rs) example:
 
 **Inspect before execute.** Plans are reviewable JSON artifacts. [`ready inspect`](src/main.rs) them, diff them, version-control them. Every decision is visible before a single tool fires.
 
+### Shell tools with JSON output
+
+When a tool's stdout is a JSON object or array, set [`output_parsing`](src/tools/shell.rs:38) to `"json"`. Ready passes the raw stdout through [`serde_json::from_str`](src/tools/shell.rs:223) and returns the parsed [`Value`](src/tools/shell.rs:9) directly to the plan interpreter. The command must exit with code 0; a non-zero exit code produces a [`ReadyError::Tool`](src/error.rs) before any parsing is attempted.
+
+Declare the shape of the JSON object in [`returns.fields`](src/tools/models.rs:23). Each entry in `fields` becomes a typed attribute in the generated Python class stub that the planner sees, so the LLM knows which keys to access in the plan.
+
+```json
+{
+  "get_weather": {
+    "description": "Fetch current weather for a city",
+    "arguments": [
+      {
+        "name": "city",
+        "description": "City name",
+        "type_name": "str"
+      }
+    ],
+    "template": ["python", "tools/get_weather.py", "{city}"],
+    "returns": {
+      "description": "Current weather data",
+      "type_name": "WeatherResult",
+      "fields": [
+        { "name": "temperature_c", "description": "Temperature in Celsius", "type_name": "float", "fields": [] },
+        { "name": "condition",     "description": "Sky condition",          "type_name": "str",   "fields": [] },
+        { "name": "humidity_pct",  "description": "Relative humidity 0–100","type_name": "int",   "fields": [] }
+      ]
+    },
+    "output_parsing": "json",
+    "active": true,
+    "output_schema": null
+  }
+}
+```
+
+The planner receives this Python stub:
+
+```python
+class WeatherResult:
+    temperature_c: float  # Temperature in Celsius
+    condition: str        # Sky condition
+    humidity_pct: int     # Relative humidity 0–100
+
+def get_weather(city: str) -> WeatherResult:
+    """Fetch current weather for a city"""
+    ...
+```
+
+The plan can then access fields by attribute: `weather.temperature_c`, `weather.condition`, etc.
+
+[`output_schema`](src/tools/shell.rs:39) accepts a JSON Schema object or `null`. The field is stored on [`ShellToolEntry`](src/tools/shell.rs:31) but is not validated at runtime; it is reserved for future use.
+
 **Observer pattern.** Hook into execution via [`ExecutionObserver`](src/execution/observer.rs) to log, trace, or react to step start, completion, suspension, and errors.
 
 ## Conventional Agents vs. Ready
