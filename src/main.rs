@@ -22,7 +22,11 @@ use ready::{ReadyError, Result};
 const DEFAULT_SHELL_TOOLS_PATH: &str = "shell-tools.json";
 
 #[derive(Parser)]
-#[command(name = "ready", about = "Ready Agent System")]
+#[command(
+    name = "ready",
+    about = "Ready Agent System",
+    long_about = "Execute SOP-driven workflows by generating plans with an LLM and running them against pluggable tool registries, including builtins, shell tools, and reusable process tools."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -30,38 +34,42 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Generate an execution plan from an SOP document using an LLM.
     Plan {
-        #[arg(long)]
+        #[arg(long, help = "Path to the SOP (Standard Operating Procedure) document.")]
         sop: String,
-        #[arg(long)]
+        #[arg(long, help = "Path to a shell-tools JSON file (default: shell-tools.json).")]
         tools: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Directory containing reusable sub-plans to register as process tools.")]
         plans_dir: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "LLM model name to use for planning (e.g. gpt-4o).")]
         model: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Output file path for the generated plan JSON (default: derived from SOP filename).")]
         output: Option<String>,
     },
+    /// Execute a plan, either from a pre-generated plan file or by planning on-the-fly from an SOP.
     Run {
-        #[arg(long)]
+        #[arg(long, help = "Path to an SOP document to plan and execute on-the-fly.")]
         sop: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Path to a pre-generated plan JSON file to execute directly.")]
         plan: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Path to a shell-tools JSON file (default: shell-tools.json).")]
         tools: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Directory containing reusable sub-plans to register as process tools.")]
         plans_dir: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "LLM model name to use when planning from an SOP.")]
         model: Option<String>,
     },
+    /// Display a human-readable summary of a previously generated plan.
     Inspect {
-        #[arg(long)]
+        #[arg(long, help = "Path to the plan JSON file to inspect.")]
         plan: String,
     },
+    /// List all available tools (builtins, shell tools, and process tools).
     Tools {
-        #[arg(long)]
+        #[arg(long, help = "Path to a shell-tools JSON file (default: shell-tools.json).")]
         tools: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Directory containing reusable sub-plans to register as process tools.")]
         plans_dir: Option<String>,
     },
 }
