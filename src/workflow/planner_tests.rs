@@ -6,9 +6,12 @@ use serde_json::{Value, json};
 use crate::error::{ReadyError, Result};
 use crate::llm::client::strip_markdown_fences;
 use crate::llm::traits::LlmClient;
-use crate::plan::{DiagnosticSeverity, Step};
+use crate::plan::Step;
 use crate::tools::models::{ToolArgumentDescription, ToolDescription, ToolReturnDescription};
 use crate::workflow::planner::SopPlanner;
+use crate::workflow::planner::build_description_prompt;
+use crate::workflow::planner::build_retry_prompt;
+use crate::workflow::planner::parse_and_validate_plan;
 
 struct MockLlm {
     responses: Arc<Mutex<Vec<String>>>,
@@ -171,17 +174,40 @@ async fn plan_retries_after_validation_error() {
     assert_eq!(calls.lock().expect("calls mutex poisoned").len(), 3);
 }
 
-#[tokio::test]
-async fn validate_plan_surfaces_hard_errors_for_undefined_variable_case() {
-    let plan = crate::planning::parser::parse_python_to_plan(
+#[test]
+fn build_retry_prompt_appends_error_context() {
+    let prompt = build_retry_prompt("Read report", &ReadyError::Llm("bad output".to_string()));
+
+    assert!(prompt.contains("Read report"));
+    assert!(prompt.contains("bad output"));
+    assert!(prompt.contains("Previous attempt failed"));
+}
+
+#[test]
+fn build_description_prompt_lists_prefillable_inputs() {
+    let prompt = build_description_prompt(
+        "Collect and send a message",
+        &[crate::plan::PrefillableInput {
+            variable_name: "channel".to_string(),
+            prompt: "Which Slack channel?".to_string(),
+        }],
+    );
+
+    assert!(prompt.contains("Collect and send a message"));
+    assert!(prompt.contains("channel"));
+    assert!(prompt.contains("Which Slack channel?"));
+}
+
+#[test]
+fn parse_and_validate_plan_reports_validation_errors_without_llm_flow() {
+    let error = parse_and_validate_plan(
         "def main():\n    post_to_slack(undefined_var)",
         "test_plan",
+        &sample_tools(),
     )
-    .expect("plan should parse");
-    let issues = crate::planning::validator::validate_plan(&plan, &sample_tools());
+    .expect_err("invalid plan should fail validation");
+
     assert!(
-        issues
-            .iter()
-            .any(|issue| issue.severity == DiagnosticSeverity::Error)
+        matches!(error, ReadyError::PlanValidation(message) if message.contains("undefined_var"))
     );
 }

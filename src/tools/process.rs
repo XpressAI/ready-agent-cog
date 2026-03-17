@@ -6,6 +6,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::{ReadyError, Result};
@@ -24,6 +25,53 @@ pub struct ProcessToolsModule {
     plans: HashMap<String, AbstractPlan>,
     descriptions: Vec<ToolDescription>,
     registry: Arc<InMemoryToolRegistry>,
+    runner: Arc<dyn ProcessPlanRunner>,
+}
+
+#[async_trait]
+pub(crate) trait ProcessPlanRunner: Send + Sync {
+    async fn execute(
+        &self,
+        registry: Arc<InMemoryToolRegistry>,
+        plan: &AbstractPlan,
+        state: &mut ExecutionState,
+    ) -> Result<()>;
+
+    async fn provide_input(
+        &self,
+        registry: Arc<InMemoryToolRegistry>,
+        plan: &AbstractPlan,
+        state: &mut ExecutionState,
+        value: Value,
+    ) -> Result<()>;
+}
+
+struct InterpreterProcessPlanRunner;
+
+#[async_trait]
+impl ProcessPlanRunner for InterpreterProcessPlanRunner {
+    async fn execute(
+        &self,
+        registry: Arc<InMemoryToolRegistry>,
+        plan: &AbstractPlan,
+        state: &mut ExecutionState,
+    ) -> Result<()> {
+        PlanInterpreter::new(registry, plan.clone())
+            .execute(state)
+            .await
+    }
+
+    async fn provide_input(
+        &self,
+        registry: Arc<InMemoryToolRegistry>,
+        plan: &AbstractPlan,
+        state: &mut ExecutionState,
+        value: Value,
+    ) -> Result<()> {
+        PlanInterpreter::new(registry, plan.clone())
+            .provide_input(state, value)
+            .await
+    }
 }
 
 impl ProcessToolsModule {
@@ -32,38 +80,115 @@ impl ProcessToolsModule {
         plans: HashMap<String, AbstractPlan>,
         registry: InMemoryToolRegistry,
     ) -> Result<Self> {
+        Self::with_runner(plans, registry, Arc::new(InterpreterProcessPlanRunner))
+    }
+
+    pub(crate) fn with_runner(
+        plans: HashMap<String, AbstractPlan>,
+        registry: InMemoryToolRegistry,
+        runner: Arc<dyn ProcessPlanRunner>,
+    ) -> Result<Self> {
         validate_process_plans(&plans, &registry)?;
         let registry = Arc::new(registry);
 
-        let descriptions = plans
-            .values()
-            .map(|plan| ToolDescription {
-                id: plan.name.clone(),
-                description: plan.description.clone(),
-                arguments: plan
-                    .prefillable_inputs()
-                    .into_iter()
-                    .map(|input| ToolArgumentDescription {
-                        name: input.variable_name,
-                        description: input.prompt,
-                        type_name: "str".to_string(),
-                        default: None,
-                    })
-                    .collect(),
-                returns: ToolReturnDescription {
-                    name: None,
-                    description: String::new(),
-                    type_name: None,
-                    fields: Vec::new(),
-                },
-            })
-            .collect();
+        let descriptions = build_process_descriptions(&plans);
 
         Ok(Self {
             plans,
             descriptions,
             registry,
+            runner,
         })
+    }
+}
+
+pub(crate) fn build_process_descriptions(
+    plans: &HashMap<String, AbstractPlan>,
+) -> Vec<ToolDescription> {
+    plans
+        .values()
+        .map(|plan| ToolDescription {
+            id: plan.name.clone(),
+            description: plan.description.clone(),
+            arguments: plan
+                .prefillable_inputs()
+                .into_iter()
+                .map(|input| ToolArgumentDescription {
+                    name: input.variable_name,
+                    description: input.prompt,
+                    type_name: "str".to_string(),
+                    default: None,
+                })
+                .collect(),
+            returns: ToolReturnDescription {
+                name: None,
+                description: String::new(),
+                type_name: None,
+                fields: Vec::new(),
+            },
+        })
+        .collect()
+}
+
+pub(crate) fn seed_execution_state(
+    descriptions: &[ToolDescription],
+    tool_id: &str,
+    args: &[Value],
+) -> Result<ExecutionState> {
+    let description = descriptions
+        .iter()
+        .find(|d| d.id == tool_id)
+        .ok_or_else(|| ReadyError::ToolNotFound(tool_id.to_string()))?;
+
+    let mut state = ExecutionState::default();
+    for (index, argument) in description.arguments.iter().enumerate() {
+        if let Some(value) = args.get(index) {
+            state
+                .interpreter_state
+                .variables
+                .insert(argument.name.clone(), value.clone());
+        }
+    }
+    Ok(state)
+}
+
+pub(crate) fn restore_execution_state(call: &ToolCall) -> Result<ExecutionState> {
+    match &call.continuation {
+        Some(cont) => Ok(serde_json::from_value::<ExecutionState>(
+            cont.state.clone(),
+        )?),
+        None => Err(ReadyError::Tool {
+            tool_id: call.tool_id.clone(),
+            message: "Missing continuation state".to_string(),
+        }),
+    }
+}
+
+pub(crate) fn map_execution_state_to_tool_result(
+    tool_id: &str,
+    state: &ExecutionState,
+) -> Result<ToolResult> {
+    match state.status {
+        ExecutionStatus::Completed => Ok(ToolResult::Success(Value::Null)),
+        ExecutionStatus::Suspended => Ok(ToolResult::Suspended(ToolSuspension {
+            reason: state
+                .suspension_reason
+                .clone()
+                .unwrap_or_else(|| "User input required".to_string()),
+            continuation_state: serde_json::to_value(state)?,
+        })),
+        ExecutionStatus::Failed => Err(ReadyError::Tool {
+            tool_id: tool_id.to_string(),
+            message: state
+                .error
+                .as_ref()
+                .map(|error| error.message.clone())
+                .unwrap_or_else(|| "Process-backed tool execution failed".to_string()),
+        }),
+        _ => Err(ReadyError::Tool {
+            tool_id: tool_id.to_string(),
+            message: format!("Unexpected process execution state: {:?}", state.status),
+        }),
     }
 }
 
@@ -135,61 +260,29 @@ impl ToolsModule for ProcessToolsModule {
                 .get(tool_id)
                 .ok_or_else(|| ReadyError::ToolNotFound(tool_id.to_string()))?;
 
-            let mut state = if let Some(cont) = &call.continuation {
-                serde_json::from_value::<ExecutionState>(cont.state.clone())?
+            let mut state = if call.continuation.is_some() {
+                restore_execution_state(call)?
             } else {
-                let mut state = ExecutionState::default();
-                let description = self
-                    .descriptions
-                    .iter()
-                    .find(|d| d.id == tool_id)
-                    .ok_or_else(|| ReadyError::ToolNotFound(tool_id.to_string()))?;
-
-                for (index, argument) in description.arguments.iter().enumerate() {
-                    if let Some(value) = call.args.get(index) {
-                        state
-                            .interpreter_state
-                            .variables
-                            .insert(argument.name.clone(), value.clone());
-                    }
-                }
-                state
+                seed_execution_state(&self.descriptions, tool_id, &call.args)?
             };
-
-            let interpreter = PlanInterpreter::new(self.registry.clone(), plan.clone());
 
             if let Some(cont) = &call.continuation {
                 if let Some(resume_value) = cont.resume_value.clone() {
-                    interpreter.provide_input(&mut state, resume_value).await?;
+                    self.runner
+                        .provide_input(self.registry.clone(), plan, &mut state, resume_value)
+                        .await?;
                 } else {
-                    interpreter.execute(&mut state).await?;
+                    self.runner
+                        .execute(self.registry.clone(), plan, &mut state)
+                        .await?;
                 }
             } else {
-                interpreter.execute(&mut state).await?;
+                self.runner
+                    .execute(self.registry.clone(), plan, &mut state)
+                    .await?;
             }
 
-            match state.status {
-                ExecutionStatus::Completed => Ok(ToolResult::Success(Value::Null)),
-                ExecutionStatus::Suspended => Ok(ToolResult::Suspended(ToolSuspension {
-                    reason: state
-                        .suspension_reason
-                        .clone()
-                        .unwrap_or_else(|| "User input required".to_string()),
-                    continuation_state: serde_json::to_value(&state)?,
-                })),
-                ExecutionStatus::Failed => Err(ReadyError::Tool {
-                    tool_id: tool_id.to_string(),
-                    message: state
-                        .error
-                        .as_ref()
-                        .map(|error| error.message.clone())
-                        .unwrap_or_else(|| "Process-backed tool execution failed".to_string()),
-                }),
-                _ => Err(ReadyError::Tool {
-                    tool_id: tool_id.to_string(),
-                    message: format!("Unexpected process execution state: {:?}", state.status),
-                }),
-            }
+            map_execution_state_to_tool_result(tool_id, &state)
         })
     }
 }

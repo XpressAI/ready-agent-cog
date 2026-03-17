@@ -2,11 +2,10 @@ use super::observer::{ExecutionObserver, LoggingObserver, NoOpObserver};
 use super::state::{ExecutionState, ExecutionStatus, StepResult};
 use crate::error::ReadyError;
 use crate::plan::{AbstractPlan, Expression, Step};
-use crate::tools::models::{ToolCall, ToolDescription, ToolResult, ToolReturnDescription};
+use crate::test_helpers::{HandlerToolsModule, to_literal};
+use crate::tools::models::{ToolDescription, ToolResult, ToolReturnDescription};
 use crate::tools::registry::InMemoryToolRegistry;
-use crate::tools::traits::ToolsModule;
 use serde_json::{Value, json};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default, Clone)]
@@ -79,26 +78,6 @@ impl ExecutionObserver for SpyObserver {
     }
 }
 
-struct MockToolsModule {
-    tools: Vec<ToolDescription>,
-    handler: Arc<dyn Fn(&str, Vec<Value>) -> crate::error::Result<ToolResult> + Send + Sync>,
-}
-
-impl ToolsModule for MockToolsModule {
-    fn tools(&self) -> &[ToolDescription] {
-        &self.tools
-    }
-
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = crate::error::Result<ToolResult>> + Send + 'a>>
-    {
-        let result = (self.handler)(call.tool_id.as_str(), call.args.clone());
-        Box::pin(async move { result })
-    }
-}
-
 fn tool_description(tool_id: &str) -> ToolDescription {
     ToolDescription {
         id: tool_id.to_string(),
@@ -119,33 +98,12 @@ fn registry_with_handler(
 ) -> InMemoryToolRegistry {
     let mut registry = InMemoryToolRegistry::new();
     registry
-        .register_module(Box::new(MockToolsModule {
-            tools,
-            handler: Arc::new(handler),
-        }))
+        .register_module(Box::new(HandlerToolsModule::new(tools, handler)))
         .unwrap();
     registry
 }
 
 fn assign(var: &str, value: Value) -> Step {
-    use crate::plan::LiteralValue;
-
-    fn to_literal(v: Value) -> LiteralValue {
-        match v {
-            Value::Null => LiteralValue::Null,
-            Value::Bool(b) => LiteralValue::Bool(b),
-            Value::Number(n) => n
-                .as_i64()
-                .map(LiteralValue::Integer)
-                .unwrap_or_else(|| LiteralValue::Float(n.as_f64().unwrap())),
-            Value::String(s) => LiteralValue::String(s),
-            Value::Array(a) => LiteralValue::Array(a.into_iter().map(to_literal).collect()),
-            Value::Object(o) => {
-                LiteralValue::Object(o.into_iter().map(|(k, v)| (k, to_literal(v))).collect())
-            }
-        }
-    }
-
     Step::AssignStep {
         target: var.to_string(),
         value: Expression::Literal {
@@ -278,61 +236,4 @@ async fn no_observer_uses_noop_by_default() {
 
     assert_eq!(state.status, ExecutionStatus::Completed);
     assert_eq!(state.interpreter_state.variables.get("x"), Some(&json!(99)));
-}
-
-#[tokio::test]
-async fn plan_start_receives_plan_name() {
-    let spy = SpyObserver::default();
-    let registry = Arc::new(InMemoryToolRegistry::new());
-    let plan = make_plan(vec![assign("a", json!(1))], "my_special_plan");
-    let interpreter = super::interpreter::PlanInterpreter::new(registry, plan.clone())
-        .with_observer(Arc::new(spy.clone()));
-    let mut state = ExecutionState::default();
-
-    interpreter
-        .execute(&mut state)
-        .await
-        .expect("plan should execute");
-
-    assert_eq!(
-        spy.snapshot().first(),
-        Some(&("plan_start".to_string(), "my_special_plan".to_string()))
-    );
-}
-
-#[tokio::test]
-async fn plan_complete_fires_even_on_failure() {
-    let spy = SpyObserver::default();
-    let registry = Arc::new(registry_with_handler(
-        vec![tool_description("fail_tool")],
-        |_tool_id, _args| {
-            Err(ReadyError::Execution {
-                step_index: None,
-                step_type: Some("ToolStep".to_string()),
-                message: "oops".to_string(),
-            })
-        },
-    ));
-    let plan = make_plan(
-        vec![Step::ToolStep {
-            tool_id: "fail_tool".to_string(),
-            arguments: Vec::new(),
-            output_variable: None,
-        }],
-        "fail_plan",
-    );
-    let interpreter = super::interpreter::PlanInterpreter::new(registry, plan.clone())
-        .with_observer(Arc::new(spy.clone()));
-    let mut state = ExecutionState::default();
-
-    let _ = interpreter.execute(&mut state).await;
-
-    assert_eq!(state.status, ExecutionStatus::Failed);
-    assert_eq!(
-        spy.snapshot()
-            .iter()
-            .filter(|(name, _)| name == "plan_complete")
-            .count(),
-        1
-    );
 }

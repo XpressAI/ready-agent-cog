@@ -77,6 +77,12 @@ pub struct SopPlanner {
     max_retries: usize,
 }
 
+struct PlanGenerationArtifacts {
+    system_prompt: String,
+    initial_user_prompt: String,
+    plan_name: String,
+}
+
 impl SopPlanner {
     /// Constructs a planner with an [`Arc`](src/workflow/planner.rs:1)-wrapped [`LlmClient`](src/llm/traits.rs:1) and a retry limit.
     pub fn new(llm: Arc<dyn LlmClient>, max_retries: usize) -> Self {
@@ -90,47 +96,30 @@ impl SopPlanner {
         sop_text: &str,
         tool_descriptions: &[ToolDescription],
     ) -> Result<AbstractPlan> {
-        let plan_name = infer_plan_name(sop_text);
-        let system_prompt = build_system_prompt(tool_descriptions);
-        let mut user_prompt = sop_text.to_string();
+        let artifacts = build_plan_generation_artifacts(sop_text, tool_descriptions);
+        let mut user_prompt = artifacts.initial_user_prompt.clone();
         let mut last_error: Option<ReadyError> = None;
 
         for attempt in 0..=self.max_retries {
-            let raw = self.llm.complete(&system_prompt, &user_prompt).await?;
+            let raw = self
+                .llm
+                .complete(&artifacts.system_prompt, &user_prompt)
+                .await?;
             let code = strip_markdown_fences(&raw);
 
-            let plan = match parse_python_to_plan(&code, &plan_name) {
+            let plan = match parse_and_validate_plan(&code, &artifacts.plan_name, tool_descriptions)
+            {
                 Ok(plan) => plan,
                 Err(error) => {
                     last_error = Some(error);
                     if attempt < self.max_retries {
                         user_prompt =
-                            error_prompt(sop_text, last_error.as_ref().expect("error set"));
+                            build_retry_prompt(sop_text, last_error.as_ref().expect("error set"));
                         continue;
                     }
                     return Err(last_error.expect("error set"));
                 }
             };
-
-            let issues = validate_plan(&plan, tool_descriptions);
-            let hard_errors = issues
-                .iter()
-                .filter(|issue| issue.severity == DiagnosticSeverity::Error)
-                .map(|issue| issue.message.clone())
-                .collect::<Vec<_>>();
-
-            if !hard_errors.is_empty() {
-                let error = ReadyError::PlanValidation(format!(
-                    "Plan validation failed: {}",
-                    hard_errors.join("; ")
-                ));
-                last_error = Some(error);
-                if attempt < self.max_retries {
-                    user_prompt = error_prompt(sop_text, last_error.as_ref().expect("error set"));
-                    continue;
-                }
-                return Err(last_error.expect("error set"));
-            }
 
             let mut plan = plan;
             let description_prompt = build_description_prompt(sop_text, &plan.prefillable_inputs());
@@ -147,6 +136,43 @@ impl SopPlanner {
             ReadyError::PlanValidation("SopPlanner exhausted retries without a result".to_string())
         }))
     }
+}
+
+fn build_plan_generation_artifacts(
+    sop_text: &str,
+    tool_descriptions: &[ToolDescription],
+) -> PlanGenerationArtifacts {
+    PlanGenerationArtifacts {
+        system_prompt: build_system_prompt(tool_descriptions),
+        initial_user_prompt: sop_text.to_string(),
+        plan_name: infer_plan_name(sop_text),
+    }
+}
+
+pub(crate) fn parse_and_validate_plan(
+    code: &str,
+    plan_name: &str,
+    tool_descriptions: &[ToolDescription],
+) -> Result<AbstractPlan> {
+    let plan = parse_python_to_plan(code, plan_name)?;
+    let hard_errors = validation_errors(&plan, tool_descriptions);
+
+    if hard_errors.is_empty() {
+        Ok(plan)
+    } else {
+        Err(ReadyError::PlanValidation(format!(
+            "Plan validation failed: {}",
+            hard_errors.join("; ")
+        )))
+    }
+}
+
+fn validation_errors(plan: &AbstractPlan, tool_descriptions: &[ToolDescription]) -> Vec<String> {
+    validate_plan(plan, tool_descriptions)
+        .iter()
+        .filter(|issue| issue.severity == DiagnosticSeverity::Error)
+        .map(|issue| issue.message.clone())
+        .collect()
 }
 
 fn build_system_prompt(tool_descriptions: &[ToolDescription]) -> String {
@@ -175,12 +201,12 @@ fn collect_user_input_description() -> ToolDescription {
     }
 }
 
-fn error_prompt(sop_text: &str, error: &ReadyError) -> String {
+pub(crate) fn build_retry_prompt(sop_text: &str, error: &ReadyError) -> String {
     let suffix = ERROR_SUFFIX_TEMPLATE.replace("{error}", &error.to_string());
     format!("{sop_text}\n\n{suffix}")
 }
 
-fn build_description_prompt(
+pub(crate) fn build_description_prompt(
     sop_text: &str,
     prefillable: &[crate::plan::PrefillableInput],
 ) -> String {

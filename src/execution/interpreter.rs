@@ -181,15 +181,7 @@ impl PlanInterpreter {
         internal_state: &mut InternalState,
     ) -> Result<StepResult> {
         match step {
-            Step::AssignStep { target, value } => {
-                let value = evaluate_expression(value, &state.interpreter_state.variables)?;
-                state
-                    .interpreter_state
-                    .variables
-                    .insert(target.clone(), value);
-                ip.advance();
-                Ok(StepResult::default())
-            }
+            Step::AssignStep { target, value } => handle_assign_step(target, value, ip, state),
             Step::ToolStep {
                 tool_id,
                 arguments,
@@ -198,140 +190,42 @@ impl PlanInterpreter {
                 self.execute_tool_step(tool_id, arguments, output_variable.as_ref(), ip, state)
                     .await
             }
-            Step::SwitchStep { branches } => {
-                let branch_index = select_branch(step, &state.interpreter_state.variables);
-                if let Some(branch_index) = branch_index {
-                    internal_state
-                        .branches
-                        .insert(ip.path.to_vec(), branch_index);
-                    let has_steps = branches
-                        .get(branch_index)
-                        .is_some_and(|branch| !branch.steps.is_empty());
-                    if has_steps {
-                        ip.descend();
-                    } else {
-                        internal_state.branches.remove(&ip.path.to_vec());
-                        ip.advance();
-                    }
-                } else {
-                    ip.advance();
-                }
-                Ok(StepResult::default())
-            }
+            Step::SwitchStep { branches } => handle_switch_step(
+                step,
+                branches,
+                ip,
+                &state.interpreter_state.variables,
+                internal_state,
+            ),
             Step::LoopStep {
                 iterable_variable,
                 item_variable,
                 ..
-            } => {
-                let key = ip.path.to_vec();
-                if let Some(loop_state) = internal_state.loops.get_mut(&key) {
-                    loop_state.index += 1;
-                    if loop_state.index < loop_state.items.len() {
-                        state.interpreter_state.variables.insert(
-                            item_variable.clone(),
-                            loop_state.items[loop_state.index].clone(),
-                        );
-                        ip.descend();
-                    } else {
-                        internal_state.loops.remove(&key);
-                        ip.advance();
-                    }
-                    return Ok(StepResult::default());
-                }
-
-                let iterable = state
-                    .interpreter_state
-                    .variables
-                    .get(iterable_variable)
-                    .cloned()
-                    .ok_or_else(|| ReadyError::Execution {
-                        step_index: state.current_step_index,
-                        step_type: Some("LoopStep".to_string()),
-                        message: format!("Undefined iterable variable: '{iterable_variable}'"),
-                    })?;
-
-                let Value::Array(items) = iterable else {
-                    return Err(ReadyError::Execution {
-                        step_index: state.current_step_index,
-                        step_type: Some("LoopStep".to_string()),
-                        message: format!("Loop variable '{iterable_variable}' is not iterable"),
-                    });
-                };
-
-                if items.is_empty() {
-                    ip.advance();
-                    return Ok(StepResult::default());
-                }
-
-                state
-                    .interpreter_state
-                    .variables
-                    .insert(item_variable.clone(), items[0].clone());
-                internal_state
-                    .loops
-                    .insert(key, LoopState { index: 0, items });
-                ip.descend();
-                Ok(StepResult::default())
-            }
-            Step::WhileStep { condition, .. } => {
-                let key = ip.path.to_vec();
-                if let Some(while_state) = internal_state.whiles.get_mut(&key) {
-                    while_state.iterations += 1;
-                    if while_state.iterations > self.max_while_iterations {
-                        internal_state.whiles.remove(&key);
-                        return Err(ReadyError::Execution {
-                            step_index: state.current_step_index,
-                            step_type: Some("WhileStep".to_string()),
-                            message: format!(
-                                "WhileStep exceeded maximum iterations ({})",
-                                self.max_while_iterations
-                            ),
-                        });
-                    }
-
-                    let condition_value =
-                        evaluate_expression(condition, &state.interpreter_state.variables)?;
-                    if crate::execution::evaluator::is_truthy(&condition_value) {
-                        ip.descend();
-                    } else {
-                        internal_state.whiles.remove(&key);
-                        ip.advance();
-                    }
-                    return Ok(StepResult::default());
-                }
-
-                let condition_value =
-                    evaluate_expression(condition, &state.interpreter_state.variables)?;
-                if crate::execution::evaluator::is_truthy(&condition_value) {
-                    internal_state
-                        .whiles
-                        .insert(key, WhileState { iterations: 1 });
-                    ip.descend();
-                } else {
-                    ip.advance();
-                }
-                Ok(StepResult::default())
-            }
+            } => handle_loop_step(
+                iterable_variable,
+                item_variable,
+                ip,
+                state.current_step_index,
+                &mut state.interpreter_state.variables,
+                internal_state,
+            ),
+            Step::WhileStep { condition, .. } => handle_while_step(
+                condition,
+                ip,
+                state.current_step_index,
+                &state.interpreter_state.variables,
+                internal_state,
+                self.max_while_iterations,
+            ),
             Step::UserInteractionStep {
                 prompt,
                 output_variable,
-            } => {
-                if let Some(output_variable) = output_variable
-                    && state
-                        .interpreter_state
-                        .variables
-                        .contains_key(output_variable)
-                {
-                    ip.advance();
-                    return Ok(StepResult::default());
-                }
-
-                state.interpreter_state.pending_input_variable = output_variable.clone();
-                Ok(StepResult {
-                    suspend: true,
-                    suspend_reason: Some(prompt.clone()),
-                })
-            }
+            } => handle_user_interaction_step(
+                prompt,
+                output_variable,
+                ip,
+                &mut state.interpreter_state,
+            ),
         }
     }
 
@@ -398,6 +292,168 @@ impl PlanInterpreter {
             }
         }
     }
+}
+
+pub(crate) fn handle_assign_step(
+    target: &str,
+    value: &crate::plan::Expression,
+    ip: &mut InstructionPointer,
+    state: &mut ExecutionState,
+) -> Result<StepResult> {
+    let value = evaluate_expression(value, &state.interpreter_state.variables)?;
+    state
+        .interpreter_state
+        .variables
+        .insert(target.to_string(), value);
+    ip.advance();
+    Ok(StepResult::default())
+}
+
+pub(crate) fn handle_switch_step(
+    step: &Step,
+    branches: &[crate::plan::ConditionalBranch],
+    ip: &mut InstructionPointer,
+    variables: &std::collections::HashMap<String, Value>,
+    internal_state: &mut InternalState,
+) -> Result<StepResult> {
+    let branch_index = select_branch(step, variables);
+    if let Some(branch_index) = branch_index {
+        internal_state
+            .branches
+            .insert(ip.path.to_vec(), branch_index);
+        let has_steps = branches
+            .get(branch_index)
+            .is_some_and(|branch| !branch.steps.is_empty());
+        if has_steps {
+            ip.descend();
+        } else {
+            internal_state.branches.remove(&ip.path.to_vec());
+            ip.advance();
+        }
+    } else {
+        ip.advance();
+    }
+    Ok(StepResult::default())
+}
+
+pub(crate) fn handle_loop_step(
+    iterable_variable: &str,
+    item_variable: &str,
+    ip: &mut InstructionPointer,
+    step_index: Option<usize>,
+    variables: &mut std::collections::HashMap<String, Value>,
+    internal_state: &mut InternalState,
+) -> Result<StepResult> {
+    let key = ip.path.to_vec();
+    if let Some(loop_state) = internal_state.loops.get_mut(&key) {
+        loop_state.index += 1;
+        if loop_state.index < loop_state.items.len() {
+            variables.insert(
+                item_variable.to_string(),
+                loop_state.items[loop_state.index].clone(),
+            );
+            ip.descend();
+        } else {
+            internal_state.loops.remove(&key);
+            ip.advance();
+        }
+        return Ok(StepResult::default());
+    }
+
+    let iterable =
+        variables
+            .get(iterable_variable)
+            .cloned()
+            .ok_or_else(|| ReadyError::Execution {
+                step_index,
+                step_type: Some("LoopStep".to_string()),
+                message: format!("Undefined iterable variable: '{iterable_variable}'"),
+            })?;
+
+    let Value::Array(items) = iterable else {
+        return Err(ReadyError::Execution {
+            step_index,
+            step_type: Some("LoopStep".to_string()),
+            message: format!("Loop variable '{iterable_variable}' is not iterable"),
+        });
+    };
+
+    if items.is_empty() {
+        ip.advance();
+        return Ok(StepResult::default());
+    }
+
+    variables.insert(item_variable.to_string(), items[0].clone());
+    internal_state
+        .loops
+        .insert(key, LoopState { index: 0, items });
+    ip.descend();
+    Ok(StepResult::default())
+}
+
+pub(crate) fn handle_while_step(
+    condition: &crate::plan::Expression,
+    ip: &mut InstructionPointer,
+    step_index: Option<usize>,
+    variables: &std::collections::HashMap<String, Value>,
+    internal_state: &mut InternalState,
+    max_while_iterations: usize,
+) -> Result<StepResult> {
+    let key = ip.path.to_vec();
+    if let Some(while_state) = internal_state.whiles.get_mut(&key) {
+        while_state.iterations += 1;
+        if while_state.iterations > max_while_iterations {
+            internal_state.whiles.remove(&key);
+            return Err(ReadyError::Execution {
+                step_index,
+                step_type: Some("WhileStep".to_string()),
+                message: format!(
+                    "WhileStep exceeded maximum iterations ({})",
+                    max_while_iterations
+                ),
+            });
+        }
+
+        let condition_value = evaluate_expression(condition, variables)?;
+        if crate::execution::evaluator::is_truthy(&condition_value) {
+            ip.descend();
+        } else {
+            internal_state.whiles.remove(&key);
+            ip.advance();
+        }
+        return Ok(StepResult::default());
+    }
+
+    let condition_value = evaluate_expression(condition, variables)?;
+    if crate::execution::evaluator::is_truthy(&condition_value) {
+        internal_state
+            .whiles
+            .insert(key, WhileState { iterations: 1 });
+        ip.descend();
+    } else {
+        ip.advance();
+    }
+    Ok(StepResult::default())
+}
+
+pub(crate) fn handle_user_interaction_step(
+    prompt: &str,
+    output_variable: &Option<String>,
+    ip: &mut InstructionPointer,
+    interpreter_state: &mut InterpreterState,
+) -> Result<StepResult> {
+    if let Some(output_variable) = output_variable
+        && interpreter_state.variables.contains_key(output_variable)
+    {
+        ip.advance();
+        return Ok(StepResult::default());
+    }
+
+    interpreter_state.pending_input_variable = output_variable.clone();
+    Ok(StepResult {
+        suspend: true,
+        suspend_reason: Some(prompt.to_string()),
+    })
 }
 
 fn instruction_pointer(state: &InterpreterState) -> Result<InstructionPointer> {

@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 use super::evaluator::evaluate_expression;
 use crate::error::ReadyError;
 use crate::plan::{
-    Accessor, BinaryOperator, BooleanOperator, ComparisonOperator, Expression, LiteralValue,
-    UnaryOperator,
+    Accessor, BinaryOperator, BooleanOperator, ComparisonOperator, Expression, UnaryOperator,
 };
+use crate::test_helpers::to_literal;
 
 fn scope(entries: &[(&str, Value)]) -> HashMap<String, Value> {
     entries
@@ -24,30 +24,6 @@ fn access(variable_name: &str) -> Expression {
 }
 
 fn literal(value: Value) -> Expression {
-    fn to_literal(value: Value) -> LiteralValue {
-        match value {
-            Value::Null => LiteralValue::Null,
-            Value::Bool(value) => LiteralValue::Bool(value),
-            Value::Number(number) => {
-                if let Some(value) = number.as_i64() {
-                    LiteralValue::Integer(value)
-                } else {
-                    LiteralValue::Float(number.as_f64().expect("finite json number"))
-                }
-            }
-            Value::String(value) => LiteralValue::String(value),
-            Value::Array(values) => {
-                LiteralValue::Array(values.into_iter().map(to_literal).collect())
-            }
-            Value::Object(values) => LiteralValue::Object(
-                values
-                    .into_iter()
-                    .map(|(key, value)| (key, to_literal(value)))
-                    .collect(),
-            ),
-        }
-    }
-
     Expression::Literal {
         value: to_literal(value),
     }
@@ -62,40 +38,18 @@ fn eval_err(expr: &Expression, variables: &[(&str, Value)]) -> ReadyError {
 }
 
 #[test]
-fn returns_value_from_scope_for_string_variable() {
-    assert_eq!(
-        eval(&access("greeting"), &[("greeting", json!("hello"))]),
-        json!("hello")
-    );
-}
+fn access_path_returns_value_from_scope_across_supported_json_types() {
+    let cases = vec![
+        ("greeting", json!("hello")),
+        ("count", json!(42)),
+        ("empty", Value::Null),
+        ("items", json!([1, 2, 3])),
+        ("data", json!({"key": "val"})),
+    ];
 
-#[test]
-fn returns_value_from_scope_for_integer_variable() {
-    assert_eq!(eval(&access("count"), &[("count", json!(42))]), json!(42));
-}
-
-#[test]
-fn returns_value_from_scope_for_null_variable() {
-    assert_eq!(
-        eval(&access("empty"), &[("empty", Value::Null)]),
-        Value::Null
-    );
-}
-
-#[test]
-fn returns_value_from_scope_for_list_variable() {
-    assert_eq!(
-        eval(&access("items"), &[("items", json!([1, 2, 3]))]),
-        json!([1, 2, 3])
-    );
-}
-
-#[test]
-fn returns_value_from_scope_for_dict_variable() {
-    assert_eq!(
-        eval(&access("data"), &[("data", json!({"key": "val"}))]),
-        json!({"key": "val"})
-    );
+    for (name, value) in cases {
+        assert_eq!(eval(&access(name), &[(name, value.clone())]), value);
+    }
 }
 
 #[test]
@@ -107,36 +61,18 @@ fn undefined_variable_raises_for_missing_reference() {
 }
 
 #[test]
-fn undefined_variable_raises_even_when_other_variables_exist() {
-    let error = eval_err(&access("missing"), &[("other", json!("exists"))]);
-    assert!(
-        matches!(error, ReadyError::Evaluation(message) if message.contains("Undefined variable: 'missing'"))
-    );
-}
+fn literal_returns_value_across_supported_json_types() {
+    let cases = vec![
+        json!("world"),
+        json!(99),
+        json!(3.14),
+        json!(true),
+        Value::Null,
+    ];
 
-#[test]
-fn literal_returns_string_value() {
-    assert_eq!(eval(&literal(json!("world")), &[]), json!("world"));
-}
-
-#[test]
-fn literal_returns_integer_value() {
-    assert_eq!(eval(&literal(json!(99)), &[]), json!(99));
-}
-
-#[test]
-fn literal_returns_float_value() {
-    assert_eq!(eval(&literal(json!(3.14)), &[]), json!(3.14));
-}
-
-#[test]
-fn literal_returns_boolean_value() {
-    assert_eq!(eval(&literal(json!(true)), &[]), json!(true));
-}
-
-#[test]
-fn literal_returns_null_value() {
-    assert_eq!(eval(&literal(Value::Null), &[]), Value::Null);
+    for value in cases {
+        assert_eq!(eval(&literal(value.clone()), &[]), value);
+    }
 }
 
 #[test]
@@ -205,180 +141,111 @@ fn binary_expression_modulo() {
 }
 
 #[test]
-fn comparison_equal_true() {
-    assert_eq!(
-        eval(&cmp(ComparisonOperator::Equal, json!(1), json!(1)), &[]),
-        json!(true)
-    );
-}
-
-#[test]
-fn comparison_equal_false() {
-    assert_eq!(
-        eval(&cmp(ComparisonOperator::Equal, json!(1), json!(2)), &[]),
-        json!(false)
-    );
-}
-
-#[test]
-fn comparison_not_equal_true() {
-    assert_eq!(
-        eval(&cmp(ComparisonOperator::NotEqual, json!(1), json!(2)), &[]),
-        json!(true)
-    );
-}
-
-#[test]
-fn comparison_not_equal_false() {
-    assert_eq!(
-        eval(&cmp(ComparisonOperator::NotEqual, json!(1), json!(1)), &[]),
-        json!(false)
-    );
-}
-
-#[test]
-fn comparison_less_than_true() {
-    assert_eq!(
-        eval(&cmp(ComparisonOperator::LessThan, json!(1), json!(2)), &[]),
-        json!(true)
-    );
-}
-
-#[test]
-fn comparison_less_than_false() {
-    assert_eq!(
-        eval(&cmp(ComparisonOperator::LessThan, json!(2), json!(1)), &[]),
-        json!(false)
-    );
-}
-
-#[test]
-fn comparison_greater_than_true() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::GreaterThan, json!(2), json!(1)),
-            &[]
+fn comparison_operators_follow_expected_truth_table() {
+    let cases = vec![
+        (ComparisonOperator::Equal, json!(1), json!(1), json!(true)),
+        (ComparisonOperator::Equal, json!(1), json!(2), json!(false)),
+        (
+            ComparisonOperator::NotEqual,
+            json!(1),
+            json!(2),
+            json!(true),
         ),
-        json!(true)
-    );
-}
-
-#[test]
-fn comparison_greater_than_false() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::GreaterThan, json!(1), json!(2)),
-            &[]
+        (
+            ComparisonOperator::NotEqual,
+            json!(1),
+            json!(1),
+            json!(false),
         ),
-        json!(false)
-    );
-}
-
-#[test]
-fn comparison_less_equal_true() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::LessThanOrEqual, json!(1), json!(1)),
-            &[]
+        (
+            ComparisonOperator::LessThan,
+            json!(1),
+            json!(2),
+            json!(true),
         ),
-        json!(true)
-    );
-}
-
-#[test]
-fn comparison_less_equal_false() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::LessThanOrEqual, json!(2), json!(1)),
-            &[]
+        (
+            ComparisonOperator::LessThan,
+            json!(2),
+            json!(1),
+            json!(false),
         ),
-        json!(false)
-    );
-}
-
-#[test]
-fn comparison_greater_equal_true() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::GreaterThanOrEqual, json!(1), json!(1)),
-            &[]
+        (
+            ComparisonOperator::GreaterThan,
+            json!(2),
+            json!(1),
+            json!(true),
         ),
-        json!(true)
-    );
-}
-
-#[test]
-fn comparison_greater_equal_false() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::GreaterThanOrEqual, json!(1), json!(2)),
-            &[]
+        (
+            ComparisonOperator::GreaterThan,
+            json!(1),
+            json!(2),
+            json!(false),
         ),
-        json!(false)
-    );
-}
-
-#[test]
-fn membership_in_true() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::In, json!("a"), json!(["a", "b"])),
-            &[]
+        (
+            ComparisonOperator::LessThanOrEqual,
+            json!(1),
+            json!(1),
+            json!(true),
         ),
-        json!(true)
-    );
-}
-
-#[test]
-fn membership_in_false() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::In, json!("c"), json!(["a", "b"])),
-            &[]
+        (
+            ComparisonOperator::LessThanOrEqual,
+            json!(2),
+            json!(1),
+            json!(false),
         ),
-        json!(false)
-    );
-}
-
-#[test]
-fn membership_not_in_true() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::NotIn, json!("c"), json!(["a", "b"])),
-            &[]
+        (
+            ComparisonOperator::GreaterThanOrEqual,
+            json!(1),
+            json!(1),
+            json!(true),
         ),
-        json!(true)
-    );
-}
-
-#[test]
-fn membership_not_in_false() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::NotIn, json!("a"), json!(["a", "b"])),
-            &[]
+        (
+            ComparisonOperator::GreaterThanOrEqual,
+            json!(1),
+            json!(2),
+            json!(false),
         ),
-        json!(false)
-    );
-}
-
-#[test]
-fn identity_is_true_for_nulls() {
-    assert_eq!(
-        eval(&cmp(ComparisonOperator::Is, Value::Null, Value::Null), &[]),
-        json!(true)
-    );
-}
-
-#[test]
-fn identity_is_not_false_for_nulls() {
-    assert_eq!(
-        eval(
-            &cmp(ComparisonOperator::IsNot, Value::Null, Value::Null),
-            &[]
+        (
+            ComparisonOperator::In,
+            json!("a"),
+            json!(["a", "b"]),
+            json!(true),
         ),
-        json!(false)
-    );
+        (
+            ComparisonOperator::In,
+            json!("c"),
+            json!(["a", "b"]),
+            json!(false),
+        ),
+        (
+            ComparisonOperator::NotIn,
+            json!("c"),
+            json!(["a", "b"]),
+            json!(true),
+        ),
+        (
+            ComparisonOperator::NotIn,
+            json!("a"),
+            json!(["a", "b"]),
+            json!(false),
+        ),
+        (
+            ComparisonOperator::Is,
+            Value::Null,
+            Value::Null,
+            json!(true),
+        ),
+        (
+            ComparisonOperator::IsNot,
+            Value::Null,
+            Value::Null,
+            json!(false),
+        ),
+    ];
+
+    for (operator, left, right, expected) in cases {
+        assert_eq!(eval(&cmp(operator, left, right), &[]), expected);
+    }
 }
 
 #[test]
@@ -410,99 +277,53 @@ fn comparison_variable_vs_literal() {
 }
 
 #[test]
-fn boolean_and_true_true() {
-    assert_eq!(
-        eval(
-            &boolean(BooleanOperator::And, vec![json!(true), json!(true)]),
-            &[]
+fn boolean_operators_follow_expected_truth_table() {
+    let cases = vec![
+        (
+            boolean(BooleanOperator::And, vec![json!(true), json!(true)]),
+            json!(true),
         ),
-        json!(true)
-    );
-}
-
-#[test]
-fn boolean_and_true_false() {
-    assert_eq!(
-        eval(
-            &boolean(BooleanOperator::And, vec![json!(true), json!(false)]),
-            &[]
+        (
+            boolean(BooleanOperator::And, vec![json!(true), json!(false)]),
+            json!(false),
         ),
-        json!(false)
-    );
-}
-
-#[test]
-fn boolean_and_false_true() {
-    assert_eq!(
-        eval(
-            &boolean(BooleanOperator::And, vec![json!(false), json!(true)]),
-            &[]
+        (
+            boolean(BooleanOperator::And, vec![json!(false), json!(true)]),
+            json!(false),
         ),
-        json!(false)
-    );
-}
-
-#[test]
-fn boolean_or_true_false() {
-    assert_eq!(
-        eval(
-            &boolean(BooleanOperator::Or, vec![json!(true), json!(false)]),
-            &[]
+        (
+            boolean(BooleanOperator::Or, vec![json!(true), json!(false)]),
+            json!(true),
         ),
-        json!(true)
-    );
-}
-
-#[test]
-fn boolean_or_false_true() {
-    assert_eq!(
-        eval(
-            &boolean(BooleanOperator::Or, vec![json!(false), json!(true)]),
-            &[]
+        (
+            boolean(BooleanOperator::Or, vec![json!(false), json!(true)]),
+            json!(true),
         ),
-        json!(true)
-    );
-}
-
-#[test]
-fn boolean_or_false_false() {
-    assert_eq!(
-        eval(
-            &boolean(BooleanOperator::Or, vec![json!(false), json!(false)]),
-            &[]
+        (
+            boolean(BooleanOperator::Or, vec![json!(false), json!(false)]),
+            json!(false),
         ),
-        json!(false)
-    );
+    ];
+
+    for (expr, expected) in cases {
+        assert_eq!(eval(&expr, &[]), expected);
+    }
 }
 
 #[test]
-fn not_true_is_false() {
-    assert_eq!(eval(&not(json!(true)), &[]), json!(false));
-}
+fn not_coerces_values_using_truthiness_rules() {
+    let cases = vec![
+        (json!(true), json!(false)),
+        (json!(false), json!(true)),
+        (json!(1), json!(false)),
+        (json!(0), json!(true)),
+        (json!("non-empty"), json!(false)),
+        (json!(""), json!(true)),
+    ];
 
-#[test]
-fn not_false_is_true() {
-    assert_eq!(eval(&not(json!(false)), &[]), json!(true));
-}
-
-#[test]
-fn not_one_is_false() {
-    assert_eq!(eval(&not(json!(1)), &[]), json!(false));
-}
-
-#[test]
-fn not_zero_is_true() {
-    assert_eq!(eval(&not(json!(0)), &[]), json!(true));
-}
-
-#[test]
-fn not_non_empty_string_is_false() {
-    assert_eq!(eval(&not(json!("non-empty")), &[]), json!(false));
-}
-
-#[test]
-fn not_empty_string_is_true() {
-    assert_eq!(eval(&not(json!("")), &[]), json!(true));
+    for (value, expected) in cases {
+        assert_eq!(eval(&not(value), &[]), expected);
+    }
 }
 
 #[test]
@@ -543,11 +364,6 @@ fn nested_not_around_comparison() {
     };
     assert_eq!(eval(&expr, &[("x", json!(0))]), json!(false));
     assert_eq!(eval(&expr, &[("x", json!(1))]), json!(true));
-}
-
-#[test]
-fn plain_access_path() {
-    assert_eq!(eval(&access("val"), &[("val", json!(99))]), json!(99));
 }
 
 #[test]

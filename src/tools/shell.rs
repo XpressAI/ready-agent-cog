@@ -65,19 +65,71 @@ impl ShellToolStore {
 pub struct ShellToolsModule {
     entries: HashMap<String, ShellToolEntry>,
     descriptions: Vec<ToolDescription>,
+    runner: std::sync::Arc<dyn ShellCommandRunner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShellCommandOutput {
+    pub success: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub(crate) trait ShellCommandRunner: Send + Sync {
+    fn run<'a>(
+        &'a self,
+        command: Vec<String>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ShellCommandOutput>> + Send + 'a>>;
+}
+
+struct TokioCommandRunner;
+
+impl ShellCommandRunner for TokioCommandRunner {
+    fn run<'a>(
+        &'a self,
+        command: Vec<String>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<ShellCommandOutput>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut process = Command::new(command.first().ok_or_else(|| ReadyError::Tool {
+                tool_id: "<unknown>".to_string(),
+                message: "Shell tool template must contain at least one command part".to_string(),
+            })?);
+
+            if command.len() > 1 {
+                process.args(&command[1..]);
+            }
+
+            let output = process.output().await?;
+            Ok(ShellCommandOutput {
+                success: output.status.success(),
+                exit_code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        })
+    }
 }
 
 impl ShellToolsModule {
     /// Constructs a shell tools module from the provided entry map.
     pub fn new(entries: HashMap<String, ShellToolEntry>) -> Self {
+        Self::with_runner(entries, std::sync::Arc::new(TokioCommandRunner))
+    }
+
+    pub(crate) fn with_runner(
+        entries: HashMap<String, ShellToolEntry>,
+        runner: std::sync::Arc<dyn ShellCommandRunner>,
+    ) -> Self {
         let descriptions = build_descriptions(&entries);
         Self {
             entries,
             descriptions,
+            runner,
         }
     }
 
-    fn render_command(
+    pub(crate) fn render_command(
         entry: &ShellToolEntry,
         args: &[Value],
         tool_id: &str,
@@ -93,9 +145,34 @@ impl ShellToolsModule {
             .map(|part| render_template_part(part, &bound, tool_id))
             .collect()
     }
+
+    pub(crate) fn parse_command_output(
+        entry: &ShellToolEntry,
+        output: ShellCommandOutput,
+        tool_id: &str,
+    ) -> Result<Value> {
+        if !matches!(entry.output_parsing, OutputParsing::Raw) && !output.success {
+            return Err(ReadyError::Tool {
+                tool_id: tool_id.to_string(),
+                message: format!(
+                    "Command failed (exit {:?}): {}",
+                    output.exit_code, output.stderr
+                ),
+            });
+        }
+
+        parse_output(
+            &entry.output_parsing,
+            &output.stdout,
+            &output.stderr,
+            tool_id,
+        )
+    }
 }
 
-fn build_descriptions(entries: &HashMap<String, ShellToolEntry>) -> Vec<ToolDescription> {
+pub(crate) fn build_descriptions(
+    entries: &HashMap<String, ShellToolEntry>,
+) -> Vec<ToolDescription> {
     entries
         .iter()
         .filter(|(_, entry)| entry.active)
@@ -127,29 +204,8 @@ impl ToolsModule for ShellToolsModule {
                 .ok_or_else(|| ReadyError::ToolNotFound(tool_id.to_string()))?;
 
             let rendered = Self::render_command(entry, args, tool_id)?;
-            let mut command = Command::new(rendered.first().ok_or_else(|| ReadyError::Tool {
-                tool_id: tool_id.to_string(),
-                message: "Shell tool template must contain at least one command part".to_string(),
-            })?);
-            if rendered.len() > 1 {
-                command.args(&rendered[1..]);
-            }
-
-            let output = command.output().await?;
-            if !matches!(entry.output_parsing, OutputParsing::Raw) && !output.status.success() {
-                return Err(ReadyError::Tool {
-                    tool_id: tool_id.to_string(),
-                    message: format!(
-                        "Command failed (exit {:?}): {}",
-                        output.status.code(),
-                        String::from_utf8_lossy(&output.stderr)
-                    ),
-                });
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let parsed = parse_output(&entry.output_parsing, &stdout, &stderr, tool_id)?;
+            let output = self.runner.run(rendered).await?;
+            let parsed = Self::parse_command_output(entry, output, tool_id)?;
 
             Ok(ToolResult::Success(parsed))
         })
@@ -165,12 +221,12 @@ pub(crate) fn parse_output(
     match parsing {
         OutputParsing::Raw => Ok(Value::String(format!("{}{}", stdout, stderr))),
         OutputParsing::Json => Ok(serde_json::from_str::<Value>(stdout)?),
-        OutputParsing::Int => Ok(Value::from(stdout.trim().parse::<i64>().map_err(|err| {
-            ReadyError::Tool {
+        OutputParsing::Int => Ok(Value::from(stdout.trim().parse::<i64>().map_err(
+            |err| ReadyError::Tool {
                 tool_id: tool_id.to_string(),
                 message: format!("Failed to parse integer output: {err}"),
-            }
-        })?)),
+            },
+        )?)),
         OutputParsing::Float => Ok(Value::from(stdout.trim().parse::<f64>().map_err(
             |err| ReadyError::Tool {
                 tool_id: tool_id.to_string(),

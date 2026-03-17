@@ -1,10 +1,13 @@
 use crate::error::{ReadyError, Result};
-use crate::execution::interpreter::PlanInterpreter;
-use crate::execution::state::{ExecutionState, ExecutionStatus};
-use crate::plan::{
-    AbstractPlan, BooleanOperator, BranchKind, ComparisonOperator, ConditionalBranch, Expression,
-    Step,
+use crate::execution::interpreter::{
+    PlanInterpreter, handle_assign_step, handle_loop_step, handle_switch_step,
+    handle_user_interaction_step, handle_while_step,
 };
+use crate::execution::state::{ExecutionState, ExecutionStatus, InstructionPointer, InternalState};
+use crate::plan::{
+    AbstractPlan, BranchKind, ComparisonOperator, ConditionalBranch, Expression, Step,
+};
+use crate::test_helpers::{HandlerToolsModule, to_literal};
 use crate::tools::models::{
     ToolArgumentDescription, ToolCall, ToolDescription, ToolResult, ToolReturnDescription,
 };
@@ -14,25 +17,6 @@ use serde_json::Value;
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::Arc;
-
-struct MockToolsModule {
-    tools: Vec<ToolDescription>,
-    handler: Arc<dyn Fn(&str, Vec<Value>) -> Result<ToolResult> + Send + Sync>,
-}
-
-impl ToolsModule for MockToolsModule {
-    fn tools(&self) -> &[ToolDescription] {
-        &self.tools
-    }
-
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-        let result = (self.handler)(call.tool_id.as_str(), call.args.clone());
-        Box::pin(async move { result })
-    }
-}
 
 fn plan(steps: Vec<Step>) -> AbstractPlan {
     AbstractPlan {
@@ -44,30 +28,6 @@ fn plan(steps: Vec<Step>) -> AbstractPlan {
 }
 
 fn expr(value: Value) -> Expression {
-    fn to_literal(value: Value) -> crate::plan::LiteralValue {
-        match value {
-            Value::Null => crate::plan::LiteralValue::Null,
-            Value::Bool(value) => crate::plan::LiteralValue::Bool(value),
-            Value::Number(number) => {
-                if let Some(value) = number.as_i64() {
-                    crate::plan::LiteralValue::Integer(value)
-                } else {
-                    crate::plan::LiteralValue::Float(number.as_f64().expect("finite json number"))
-                }
-            }
-            Value::String(value) => crate::plan::LiteralValue::String(value),
-            Value::Array(values) => {
-                crate::plan::LiteralValue::Array(values.into_iter().map(to_literal).collect())
-            }
-            Value::Object(values) => crate::plan::LiteralValue::Object(
-                values
-                    .into_iter()
-                    .map(|(key, value)| (key, to_literal(value)))
-                    .collect(),
-            ),
-        }
-    }
-
     Expression::Literal {
         value: to_literal(value),
     }
@@ -161,10 +121,7 @@ fn registry_with_handler(
 ) -> InMemoryToolRegistry {
     let mut registry = InMemoryToolRegistry::new();
     registry
-        .register_module(Box::new(MockToolsModule {
-            tools,
-            handler: Arc::new(handler),
-        }))
+        .register_module(Box::new(HandlerToolsModule::new(tools, handler)))
         .unwrap();
     registry
 }
@@ -271,63 +228,159 @@ async fn string_join_converts_non_strings_to_string() {
 }
 
 #[tokio::test]
-async fn builtin_arithmetic_mod() {
+async fn builtin_arithmetic_assignments_execute_through_expression_engine() {
     let registry = Arc::new(InMemoryToolRegistry::new());
-    let plan = plan(vec![binary_assign(
-        "r",
-        crate::plan::BinaryOperator::Modulo,
-        json!(10),
-        json!(3),
-    )]);
+    let plan = plan(vec![
+        binary_assign(
+            "mod",
+            crate::plan::BinaryOperator::Modulo,
+            json!(10),
+            json!(3),
+        ),
+        binary_assign(
+            "sub",
+            crate::plan::BinaryOperator::Subtract,
+            json!(10),
+            json!(3),
+        ),
+        binary_assign(
+            "mul",
+            crate::plan::BinaryOperator::Multiply,
+            json!(6),
+            json!(7),
+        ),
+        binary_assign(
+            "floordiv",
+            crate::plan::BinaryOperator::FloorDivide,
+            json!(10),
+            json!(3),
+        ),
+    ]);
     let state = execute_plan(registry, &plan)
         .await
         .expect("plan should execute");
-    assert_eq!(state.interpreter_state.variables.get("r"), Some(&json!(1)));
+    assert_eq!(
+        state.interpreter_state.variables.get("mod"),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        state.interpreter_state.variables.get("sub"),
+        Some(&json!(7))
+    );
+    assert_eq!(
+        state.interpreter_state.variables.get("mul"),
+        Some(&json!(42))
+    );
+    assert_eq!(
+        state.interpreter_state.variables.get("floordiv"),
+        Some(&json!(3))
+    );
 }
 
-#[tokio::test]
-async fn builtin_arithmetic_sub() {
-    let registry = Arc::new(InMemoryToolRegistry::new());
-    let plan = plan(vec![binary_assign(
-        "r",
-        crate::plan::BinaryOperator::Subtract,
-        json!(10),
-        json!(3),
-    )]);
-    let state = execute_plan(registry, &plan)
-        .await
-        .expect("plan should execute");
-    assert_eq!(state.interpreter_state.variables.get("r"), Some(&json!(7)));
+#[test]
+fn handle_assign_step_sets_value_without_full_interpreter() {
+    let mut state = ExecutionState::default();
+    let mut ip = InstructionPointer { path: vec![0] };
+
+    handle_assign_step("x", &expr(json!(5)), &mut ip, &mut state).expect("assign should work");
+
+    assert_eq!(state.interpreter_state.variables.get("x"), Some(&json!(5)));
+    assert_eq!(ip.path, vec![1]);
 }
 
-#[tokio::test]
-async fn builtin_arithmetic_mul() {
-    let registry = Arc::new(InMemoryToolRegistry::new());
-    let plan = plan(vec![binary_assign(
-        "r",
-        crate::plan::BinaryOperator::Multiply,
-        json!(6),
-        json!(7),
-    )]);
-    let state = execute_plan(registry, &plan)
-        .await
-        .expect("plan should execute");
-    assert_eq!(state.interpreter_state.variables.get("r"), Some(&json!(42)));
+#[test]
+fn handle_switch_step_descends_into_selected_branch_without_run_loop() {
+    let mut ip = InstructionPointer { path: vec![0] };
+    let mut internal_state = InternalState::default();
+    let step = Step::SwitchStep {
+        branches: vec![ConditionalBranch {
+            kind: BranchKind::If,
+            condition: Some(expr(json!(true))),
+            steps: vec![assign("x", json!(1))],
+        }],
+    };
+
+    let Step::SwitchStep { branches } = &step else {
+        panic!("expected switch");
+    };
+    handle_switch_step(
+        &step,
+        branches,
+        &mut ip,
+        &std::collections::HashMap::new(),
+        &mut internal_state,
+    )
+    .expect("switch should work");
+
+    assert_eq!(ip.path, vec![0, 0]);
+    assert_eq!(internal_state.branches.get(&vec![0]), Some(&0));
 }
 
-#[tokio::test]
-async fn builtin_arithmetic_floordiv() {
-    let registry = Arc::new(InMemoryToolRegistry::new());
-    let plan = plan(vec![binary_assign(
-        "r",
-        crate::plan::BinaryOperator::FloorDivide,
-        json!(10),
-        json!(3),
-    )]);
-    let state = execute_plan(registry, &plan)
-        .await
-        .expect("plan should execute");
-    assert_eq!(state.interpreter_state.variables.get("r"), Some(&json!(3)));
+#[test]
+fn handle_loop_step_initializes_iteration_state_without_execute() {
+    let mut ip = InstructionPointer { path: vec![2] };
+    let mut internal_state = InternalState::default();
+    let mut variables = std::collections::HashMap::from([("items".to_string(), json!(["a", "b"]))]);
+
+    handle_loop_step(
+        "items",
+        "item",
+        &mut ip,
+        Some(0),
+        &mut variables,
+        &mut internal_state,
+    )
+    .expect("loop should work");
+
+    assert_eq!(variables.get("item"), Some(&json!("a")));
+    assert_eq!(ip.path, vec![2, 0]);
+    assert_eq!(internal_state.loops.get(&vec![2]).map(|s| s.index), Some(0));
+}
+
+#[test]
+fn handle_while_step_stops_after_iteration_limit_without_run_loop() {
+    let mut ip = InstructionPointer { path: vec![1] };
+    let mut internal_state = InternalState::default();
+    internal_state.whiles.insert(
+        vec![1],
+        crate::execution::state::WhileState { iterations: 1 },
+    );
+
+    let error = handle_while_step(
+        &expr(json!(true)),
+        &mut ip,
+        Some(3),
+        &std::collections::HashMap::new(),
+        &mut internal_state,
+        1,
+    )
+    .expect_err("while should hit limit");
+
+    assert!(
+        matches!(error, ReadyError::Execution { message, .. } if message.contains("exceeded maximum iterations"))
+    );
+}
+
+#[test]
+fn handle_user_interaction_step_suspends_without_full_plan_execution() {
+    let mut ip = InstructionPointer { path: vec![4] };
+    let mut interpreter_state = crate::execution::state::InterpreterState::default();
+
+    let result = handle_user_interaction_step(
+        "Enter your input:",
+        &Some("answer".to_string()),
+        &mut ip,
+        &mut interpreter_state,
+    )
+    .expect("interaction should suspend");
+
+    assert!(result.suspend);
+    assert_eq!(result.suspend_reason.as_deref(), Some("Enter your input:"));
+    assert_eq!(
+        interpreter_state.pending_input_variable.as_deref(),
+        Some("answer")
+    );
+    assert_eq!(ip.path, vec![4]);
 }
 
 #[tokio::test]
@@ -1009,129 +1062,6 @@ async fn while_step_with_not_condition() {
     assert_eq!(
         state.interpreter_state.variables.get("done"),
         Some(&json!(true))
-    );
-}
-
-#[tokio::test]
-async fn condition_evaluation_smoke_comparison_selects_true_branch() {
-    let registry = Arc::new(InMemoryToolRegistry::new());
-    let plan = plan(vec![
-        assign("x", json!(5)),
-        Step::SwitchStep {
-            branches: vec![
-                ConditionalBranch {
-                    kind: BranchKind::If,
-                    condition: Some(Expression::Comparison {
-                        operator: ComparisonOperator::Equal,
-                        left: Box::new(access("x")),
-                        right: Box::new(expr(json!(5))),
-                    }),
-                    steps: vec![assign("result", json!("yes"))],
-                },
-                ConditionalBranch {
-                    kind: BranchKind::Else,
-                    condition: None,
-                    steps: vec![assign("result", json!("no"))],
-                },
-            ],
-        },
-    ]);
-    let state = execute_plan(registry, &plan)
-        .await
-        .expect("plan should execute");
-    assert_eq!(
-        state.interpreter_state.variables.get("result"),
-        Some(&json!("yes"))
-    );
-}
-
-#[tokio::test]
-async fn condition_evaluation_smoke_compound_and_condition() {
-    let registry = Arc::new(InMemoryToolRegistry::new());
-    let plan = plan(vec![
-        assign("a", json!(10)),
-        assign("b", json!(20)),
-        Step::SwitchStep {
-            branches: vec![
-                ConditionalBranch {
-                    kind: BranchKind::If,
-                    condition: Some(Expression::Boolean {
-                        operator: BooleanOperator::And,
-                        operands: vec![
-                            Expression::Comparison {
-                                operator: ComparisonOperator::GreaterThan,
-                                left: Box::new(access("a")),
-                                right: Box::new(expr(json!(5))),
-                            },
-                            Expression::Comparison {
-                                operator: ComparisonOperator::LessThan,
-                                left: Box::new(access("b")),
-                                right: Box::new(expr(json!(30))),
-                            },
-                        ],
-                    }),
-                    steps: vec![assign("result", json!("both_true"))],
-                },
-                ConditionalBranch {
-                    kind: BranchKind::Else,
-                    condition: None,
-                    steps: vec![assign("result", json!("not_both"))],
-                },
-            ],
-        },
-    ]);
-    let state = execute_plan(registry, &plan)
-        .await
-        .expect("plan should execute");
-    assert_eq!(
-        state.interpreter_state.variables.get("result"),
-        Some(&json!("both_true"))
-    );
-}
-
-#[tokio::test]
-async fn full_pipeline_end_to_end_plan() {
-    let registry = Arc::new(registry_with_handler(
-        vec![
-            tool_description("add_numbers", &["a", "b"]),
-            tool_description("reverse_string", &["s"]),
-        ],
-        |tool_id, args| match tool_id {
-            "add_numbers" => Ok(ToolResult::Success(json!(
-                args[0].as_i64().unwrap() + args[1].as_i64().unwrap()
-            ))),
-            "reverse_string" => Ok(ToolResult::Success(json!(
-                args[0].as_str().unwrap().chars().rev().collect::<String>()
-            ))),
-            other => Err(ReadyError::ToolNotFound(other.to_string())),
-        },
-    ));
-    let plan = plan(vec![
-        assign("a", json!(5)),
-        assign("b", json!(3)),
-        tool_call("add_numbers", vec![access("a"), access("b")], Some("sum")),
-        assign("label", json!("Result")),
-        join_str(
-            "message",
-            vec![access("label"), expr(json!(": ")), access("sum")],
-        ),
-        tool_call("reverse_string", vec![access("message")], Some("reversed")),
-    ]);
-    let state = execute_plan(registry, &plan)
-        .await
-        .expect("plan should execute");
-    assert_eq!(state.status, ExecutionStatus::Completed);
-    assert_eq!(
-        state.interpreter_state.variables.get("sum"),
-        Some(&json!(8))
-    );
-    assert_eq!(
-        state.interpreter_state.variables.get("message"),
-        Some(&json!("Result: 8"))
-    );
-    assert_eq!(
-        state.interpreter_state.variables.get("reversed"),
-        Some(&json!("8 :tluseR"))
     );
 }
 

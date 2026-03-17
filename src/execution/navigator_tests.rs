@@ -3,31 +3,12 @@ use crate::execution::state::{InstructionPointer, InternalState};
 use crate::plan::{
     BranchKind, ComparisonOperator, ConditionalBranch, Expression, LiteralValue, Step,
 };
+use crate::test_helpers::to_literal;
 use serde_json::json;
 use std::collections::HashMap;
 
 fn literal(value: serde_json::Value) -> LiteralValue {
-    match value {
-        serde_json::Value::Null => LiteralValue::Null,
-        serde_json::Value::Bool(value) => LiteralValue::Bool(value),
-        serde_json::Value::Number(number) => {
-            if let Some(value) = number.as_i64() {
-                LiteralValue::Integer(value)
-            } else {
-                LiteralValue::Float(number.as_f64().expect("finite json number"))
-            }
-        }
-        serde_json::Value::String(value) => LiteralValue::String(value),
-        serde_json::Value::Array(values) => {
-            LiteralValue::Array(values.into_iter().map(literal).collect())
-        }
-        serde_json::Value::Object(values) => LiteralValue::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, literal(value)))
-                .collect(),
-        ),
-    }
+    to_literal(value)
 }
 
 fn tool(tool_id: &str) -> Step {

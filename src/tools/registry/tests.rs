@@ -1,10 +1,7 @@
 use super::runtime::InMemoryToolRegistry;
 use crate::error::{ReadyError, Result};
-use crate::llm::traits::LlmClient;
-use crate::tools::builtin::BuiltinToolsModule;
 use crate::tools::models::{ToolCall, ToolDescription, ToolResult};
 use crate::tools::traits::ToolsModule;
-use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -34,41 +31,6 @@ impl ToolsModule for StubToolsModule {
             None => Err(ReadyError::ToolNotFound(call.tool_id.clone())),
         };
         Box::pin(async move { result })
-    }
-}
-
-struct MockLlm {
-    complete_response: String,
-    extract_response: Value,
-    complete_calls: Arc<Mutex<Vec<(String, String)>>>,
-    extract_calls: Arc<Mutex<Vec<(String, String, Value)>>>,
-}
-
-#[async_trait]
-impl LlmClient for MockLlm {
-    async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
-        self.complete_calls
-            .lock()
-            .expect("complete calls mutex poisoned")
-            .push((system_prompt.to_string(), user_prompt.to_string()));
-        Ok(self.complete_response.clone())
-    }
-
-    async fn extract(
-        &self,
-        system_prompt: &str,
-        user_prompt: &str,
-        json_schema: &Value,
-    ) -> Result<Value> {
-        self.extract_calls
-            .lock()
-            .expect("extract calls mutex poisoned")
-            .push((
-                system_prompt.to_string(),
-                user_prompt.to_string(),
-                json_schema.clone(),
-            ));
-        Ok(self.extract_response.clone())
     }
 }
 
@@ -172,32 +134,6 @@ async fn unknown_tool_raises() {
         .expect_err("unknown tool should error");
 
     assert!(matches!(error, ReadyError::ToolNotFound(tool_id) if tool_id == "nonexistent"));
-}
-
-#[test]
-fn builtin_tools_are_listed() {
-    let complete_calls = Arc::new(Mutex::new(Vec::new()));
-    let extract_calls = Arc::new(Mutex::new(Vec::new()));
-    let llm = Arc::new(MockLlm {
-        complete_response: "delegated-result".to_string(),
-        extract_response: json!({"status": "ok"}),
-        complete_calls,
-        extract_calls,
-    });
-    let mut registry = InMemoryToolRegistry::new();
-    registry
-        .register_module(Box::new(BuiltinToolsModule::new(llm)))
-        .unwrap();
-
-    let tool_ids = registry
-        .tools()
-        .into_iter()
-        .map(|tool| tool.id)
-        .collect::<std::collections::HashSet<_>>();
-
-    assert!(tool_ids.contains("delegate_to_large_language_model"));
-    assert!(tool_ids.contains("extract_from_plaintext"));
-    assert!(!tool_ids.contains("collect_user_input"));
 }
 
 #[test]

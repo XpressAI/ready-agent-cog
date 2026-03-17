@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::Result;
@@ -14,11 +15,64 @@ use crate::tools::registry::InMemoryToolRegistry;
 
 type SuspendCallback = dyn Fn(&str) -> Option<String> + Send + Sync;
 
+#[async_trait]
+pub(crate) trait PlanRunner: Send + Sync {
+    async fn execute(
+        &self,
+        registry: Arc<InMemoryToolRegistry>,
+        observer: Arc<dyn ExecutionObserver>,
+        plan: &AbstractPlan,
+        state: &mut ExecutionState,
+    ) -> Result<()>;
+
+    async fn provide_input(
+        &self,
+        registry: Arc<InMemoryToolRegistry>,
+        observer: Arc<dyn ExecutionObserver>,
+        plan: &AbstractPlan,
+        state: &mut ExecutionState,
+        value: Value,
+    ) -> Result<()>;
+}
+
+struct InterpreterPlanRunner;
+
+#[async_trait]
+impl PlanRunner for InterpreterPlanRunner {
+    async fn execute(
+        &self,
+        registry: Arc<InMemoryToolRegistry>,
+        observer: Arc<dyn ExecutionObserver>,
+        plan: &AbstractPlan,
+        state: &mut ExecutionState,
+    ) -> Result<()> {
+        PlanInterpreter::new(registry, plan.clone())
+            .with_observer(observer)
+            .execute(state)
+            .await
+    }
+
+    async fn provide_input(
+        &self,
+        registry: Arc<InMemoryToolRegistry>,
+        observer: Arc<dyn ExecutionObserver>,
+        plan: &AbstractPlan,
+        state: &mut ExecutionState,
+        value: Value,
+    ) -> Result<()> {
+        PlanInterpreter::new(registry, plan.clone())
+            .with_observer(observer)
+            .provide_input(state, value)
+            .await
+    }
+}
+
 /// High-level executor that resolves a plan against the tool registry and runs it through a [`PlanInterpreter`](src/execution/interpreter.rs:1).
 /// It also manages optional observer wiring and pre-filled execution inputs.
 pub struct SopExecutor {
     registry: Arc<InMemoryToolRegistry>,
     observer: Arc<dyn ExecutionObserver>,
+    runner: Arc<dyn PlanRunner>,
 }
 
 impl SopExecutor {
@@ -27,9 +81,18 @@ impl SopExecutor {
         registry: Arc<InMemoryToolRegistry>,
         observer: Option<Arc<dyn ExecutionObserver>>,
     ) -> Self {
+        Self::with_runner(registry, observer, Arc::new(InterpreterPlanRunner))
+    }
+
+    pub(crate) fn with_runner(
+        registry: Arc<InMemoryToolRegistry>,
+        observer: Option<Arc<dyn ExecutionObserver>>,
+        runner: Arc<dyn PlanRunner>,
+    ) -> Self {
         Self {
             registry,
             observer: observer.unwrap_or_else(|| Arc::new(NoOpObserver)),
+            runner,
         }
     }
 
@@ -47,10 +110,14 @@ impl SopExecutor {
         };
         state.interpreter_state.variables.extend(initial_inputs);
 
-        let interpreter = PlanInterpreter::new(self.registry.clone(), plan.clone())
-            .with_observer(self.observer.clone());
-
-        interpreter.execute(&mut state).await?;
+        self.runner
+            .execute(
+                self.registry.clone(),
+                self.observer.clone(),
+                plan,
+                &mut state,
+            )
+            .await?;
 
         while state.status == ExecutionStatus::Suspended {
             let Some(callback) = on_suspend.as_ref() else {
@@ -66,8 +133,14 @@ impl SopExecutor {
                 break;
             };
 
-            interpreter
-                .provide_input(&mut state, Value::String(value))
+            self.runner
+                .provide_input(
+                    self.registry.clone(),
+                    self.observer.clone(),
+                    plan,
+                    &mut state,
+                    Value::String(value),
+                )
                 .await?;
         }
 
@@ -82,8 +155,14 @@ impl SopExecutor {
         state: &mut ExecutionState,
         value: Value,
     ) -> Result<()> {
-        let interpreter = PlanInterpreter::new(self.registry.clone(), plan.clone())
-            .with_observer(self.observer.clone());
-        interpreter.provide_input(state, value).await
+        self.runner
+            .provide_input(
+                self.registry.clone(),
+                self.observer.clone(),
+                plan,
+                state,
+                value,
+            )
+            .await
     }
 }

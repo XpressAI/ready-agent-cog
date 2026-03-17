@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -8,10 +7,10 @@ use serde_json::{Value, json};
 use crate::execution::state::ExecutionStatus;
 use crate::llm::traits::LlmClient;
 use crate::plan::{AbstractPlan, Expression, Step};
+use crate::test_helpers::{HandlerToolsModule, to_literal};
 use crate::tools::builtin::BuiltinToolsModule;
-use crate::tools::models::{ToolCall, ToolDescription, ToolResult};
+use crate::tools::models::{ToolDescription, ToolResult};
 use crate::tools::registry::InMemoryToolRegistry;
-use crate::tools::traits::ToolsModule;
 use crate::workflow::executor::SopExecutor;
 
 struct MockLlm;
@@ -36,16 +35,14 @@ impl LlmClient for MockLlm {
     }
 }
 
-struct SendModule {
-    sent: Arc<Mutex<Vec<String>>>,
-    tools: Vec<ToolDescription>,
-}
-
-impl SendModule {
-    fn new(sent: Arc<Mutex<Vec<String>>>) -> Self {
-        Self {
-            sent,
-            tools: vec![ToolDescription {
+fn registry_with_send(sent: Arc<Mutex<Vec<String>>>) -> Arc<InMemoryToolRegistry> {
+    let mut registry = InMemoryToolRegistry::new();
+    registry
+        .register_module(Box::new(BuiltinToolsModule::new(Arc::new(MockLlm))))
+        .unwrap();
+    registry
+        .register_module(Box::new(HandlerToolsModule::new(
+            vec![ToolDescription {
                 id: "send".to_string(),
                 description: "Send a message".to_string(),
                 arguments: vec![crate::tools::models::ToolArgumentDescription {
@@ -61,66 +58,21 @@ impl SendModule {
                     fields: Vec::new(),
                 },
             }],
-        }
-    }
-}
-
-impl ToolsModule for SendModule {
-    fn tools(&self) -> &[ToolDescription] {
-        &self.tools
-    }
-
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = crate::error::Result<ToolResult>> + Send + 'a>>
-    {
-        self.sent.lock().expect("sent mutex poisoned").push(
-            call.args[0]
-                .as_str()
-                .expect("message should be a string")
-                .to_string(),
-        );
-        Box::pin(async move { Ok(ToolResult::Success(Value::Null)) })
-    }
-}
-
-fn registry_with_send(sent: Arc<Mutex<Vec<String>>>) -> Arc<InMemoryToolRegistry> {
-    let mut registry = InMemoryToolRegistry::new();
-    registry
-        .register_module(Box::new(BuiltinToolsModule::new(Arc::new(MockLlm))))
-        .unwrap();
-    registry
-        .register_module(Box::new(SendModule::new(sent)))
+            move |_tool_id, args| {
+                sent.lock().expect("sent mutex poisoned").push(
+                    args[0]
+                        .as_str()
+                        .expect("message should be a string")
+                        .to_string(),
+                );
+                Ok(ToolResult::Success(Value::Null))
+            },
+        )))
         .unwrap();
     Arc::new(registry)
 }
 
 fn literal(value: Value) -> Expression {
-    fn to_literal(value: Value) -> crate::plan::LiteralValue {
-        match value {
-            Value::Null => crate::plan::LiteralValue::Null,
-            Value::Bool(value) => crate::plan::LiteralValue::Bool(value),
-            Value::Number(number) => {
-                if let Some(value) = number.as_i64() {
-                    crate::plan::LiteralValue::Integer(value)
-                } else {
-                    crate::plan::LiteralValue::Float(number.as_f64().expect("finite json number"))
-                }
-            }
-            Value::String(value) => crate::plan::LiteralValue::String(value),
-            Value::Array(values) => {
-                crate::plan::LiteralValue::Array(values.into_iter().map(to_literal).collect())
-            }
-            Value::Object(values) => crate::plan::LiteralValue::Object(
-                values
-                    .into_iter()
-                    .map(|(key, value)| (key, to_literal(value)))
-                    .collect(),
-            ),
-        }
-    }
-
     Expression::Literal {
         value: to_literal(value),
     }
@@ -131,6 +83,72 @@ fn access(name: &str) -> Expression {
         variable_name: name.to_string(),
         accessors: Vec::new(),
     }
+}
+
+#[derive(Clone)]
+struct StubPlanRunner {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl super::executor::PlanRunner for StubPlanRunner {
+    async fn execute(
+        &self,
+        _registry: Arc<InMemoryToolRegistry>,
+        _observer: Arc<dyn crate::execution::observer::ExecutionObserver>,
+        _plan: &AbstractPlan,
+        state: &mut crate::execution::state::ExecutionState,
+    ) -> crate::error::Result<()> {
+        self.events
+            .lock()
+            .expect("events mutex poisoned")
+            .push("execute".to_string());
+
+        if let Some(value) = state.interpreter_state.variables.get("user_input").cloned() {
+            state
+                .interpreter_state
+                .variables
+                .insert("sent_message".to_string(), value);
+            state.status = ExecutionStatus::Completed;
+        } else {
+            state.status = ExecutionStatus::Suspended;
+            state.suspension_reason = Some("Enter your input:".to_string());
+        }
+        Ok(())
+    }
+
+    async fn provide_input(
+        &self,
+        _registry: Arc<InMemoryToolRegistry>,
+        _observer: Arc<dyn crate::execution::observer::ExecutionObserver>,
+        _plan: &AbstractPlan,
+        state: &mut crate::execution::state::ExecutionState,
+        value: Value,
+    ) -> crate::error::Result<()> {
+        self.events
+            .lock()
+            .expect("events mutex poisoned")
+            .push(format!("resume:{value}"));
+        state
+            .interpreter_state
+            .variables
+            .insert("user_input".to_string(), value.clone());
+        state
+            .interpreter_state
+            .variables
+            .insert("sent_message".to_string(), value);
+        state.status = ExecutionStatus::Completed;
+        state.suspension_reason = None;
+        Ok(())
+    }
+}
+
+fn executor_with_stub_runner(events: Arc<Mutex<Vec<String>>>) -> SopExecutor {
+    SopExecutor::with_runner(
+        Arc::new(InMemoryToolRegistry::new()),
+        None,
+        Arc::new(StubPlanRunner { events }),
+    )
 }
 
 #[tokio::test]
@@ -163,9 +181,8 @@ async fn execute_runs_simple_plan_to_completion() {
 
 #[tokio::test]
 async fn execute_returns_suspended_state_and_resume_completes() {
-    let sent = Arc::new(Mutex::new(Vec::new()));
-    let registry = registry_with_send(sent.clone());
-    let executor = SopExecutor::new(registry, None);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let executor = executor_with_stub_runner(events.clone());
 
     let plan = AbstractPlan {
         name: "interactive".to_string(),
@@ -205,16 +222,19 @@ async fn execute_returns_suspended_state_and_resume_completes() {
         .expect("resume should complete");
     assert_eq!(state.status, ExecutionStatus::Completed);
     assert_eq!(
-        *sent.lock().expect("sent mutex poisoned"),
-        vec!["start".to_string(), "user_answer".to_string()]
+        state.interpreter_state.variables.get("sent_message"),
+        Some(&json!("user_answer"))
+    );
+    assert_eq!(
+        *events.lock().expect("events mutex poisoned"),
+        vec!["execute".to_string(), r#"resume:"user_answer""#.to_string()]
     );
 }
 
 #[tokio::test]
 async fn execute_seeds_initial_inputs_and_skips_user_interaction() {
-    let sent = Arc::new(Mutex::new(Vec::new()));
-    let registry = registry_with_send(sent.clone());
-    let executor = SopExecutor::new(registry, None);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let executor = executor_with_stub_runner(events.clone());
 
     let plan = AbstractPlan {
         name: "seeded".to_string(),
@@ -244,7 +264,11 @@ async fn execute_seeds_initial_inputs_and_skips_user_interaction() {
 
     assert_eq!(state.status, ExecutionStatus::Completed);
     assert_eq!(
-        *sent.lock().expect("sent mutex poisoned"),
-        vec!["pre-filled".to_string()]
+        state.interpreter_state.variables.get("sent_message"),
+        Some(&json!("pre-filled"))
+    );
+    assert_eq!(
+        *events.lock().expect("events mutex poisoned"),
+        vec!["execute".to_string()]
     );
 }

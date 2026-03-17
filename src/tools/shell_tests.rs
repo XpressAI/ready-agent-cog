@@ -1,11 +1,14 @@
 use super::*;
+use crate::error::ReadyError;
+use crate::tools::shell::ShellCommandOutput;
+use crate::tools::shell::ShellCommandRunner;
 use crate::tools::shell::parse_output;
 use crate::tools::shell::render_template_part;
-use crate::error::ReadyError;
-use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn entry(template: &[&str]) -> ShellToolEntry {
@@ -43,10 +46,37 @@ fn shell_module(entries: HashMap<String, ShellToolEntry>) -> ShellToolsModule {
     ShellToolsModule::new(entries)
 }
 
+struct RecordingRunner {
+    commands: Arc<Mutex<Vec<Vec<String>>>>,
+    output: ShellCommandOutput,
+}
+
+impl ShellCommandRunner for RecordingRunner {
+    fn run<'a>(
+        &'a self,
+        command: Vec<String>,
+    ) -> Pin<
+        Box<dyn std::future::Future<Output = crate::error::Result<ShellCommandOutput>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            self.commands
+                .lock()
+                .expect("commands mutex poisoned")
+                .push(command);
+            Ok(self.output.clone())
+        })
+    }
+}
+
 fn echo_template(message: &str) -> Vec<String> {
     #[cfg(windows)]
     {
-        vec!["cmd".to_string(), "/c".to_string(), "echo".to_string(), message.to_string()]
+        vec![
+            "cmd".to_string(),
+            "/c".to_string(),
+            "echo".to_string(),
+            message.to_string(),
+        ]
     }
 
     #[cfg(not(windows))]
@@ -54,7 +84,10 @@ fn echo_template(message: &str) -> Vec<String> {
         vec![
             "sh".to_string(),
             "-c".to_string(),
-            format!("printf '%s\\n' \"{}\"", message.replace('\\', "\\\\").replace('"', "\\\"")),
+            format!(
+                "printf '%s\\n' \"{}\"",
+                message.replace('\\', "\\\\").replace('"', "\\\"")
+            ),
         ]
     }
 }
@@ -135,41 +168,71 @@ fn list_tools_returns_only_active_entries_with_preserved_fields() {
     assert_eq!(listed[0].returns, active.returns);
 }
 
-#[tokio::test]
-async fn execute_tool_binds_arguments_and_runs_command() {
+#[test]
+fn render_command_binds_arguments_without_spawning_process() {
     let template = echo_template("{message}");
-    let module = shell_module(HashMap::from([(
-        "echo_message".to_string(),
-        ShellToolEntry {
-            description: "Echo a message".to_string(),
-            template,
-            arguments: vec![argument("message", "str", "Message", None)],
-            returns: ToolReturnDescription {
-                name: Some("output".to_string()),
-                description: String::new(),
-                type_name: Some("str".to_string()),
-                fields: Vec::new(),
-            },
-            active: true,
-            output_parsing: OutputParsing::Raw,
-            output_schema: None,
+    let entry = ShellToolEntry {
+        description: "Echo a message".to_string(),
+        template,
+        arguments: vec![argument("message", "str", "Message", None)],
+        returns: ToolReturnDescription {
+            name: Some("output".to_string()),
+            description: String::new(),
+            type_name: Some("str".to_string()),
+            fields: Vec::new(),
         },
-    )]));
-
-    use crate::tools::models::ToolCall;
-    let call = ToolCall {
-        tool_id: "echo_message".to_string(),
-        args: vec![json!("hello")],
-        continuation: None,
+        active: true,
+        output_parsing: OutputParsing::Raw,
+        output_schema: None,
     };
-    let result = module.execute(&call).await.expect("command should execute");
+    let rendered = ShellToolsModule::render_command(&entry, &[json!("hello")], "echo_message")
+        .expect("command should render");
 
-    match result {
-        ToolResult::Success(Value::String(output)) => {
-            assert!(output.to_ascii_lowercase().contains("hello"))
+    assert_eq!(rendered, echo_template("hello"));
+}
+
+#[test]
+fn parse_command_output_rejects_failed_non_raw_command() {
+    let mut entry = entry(&["tool"]);
+    entry.output_parsing = OutputParsing::Json;
+
+    let error = ShellToolsModule::parse_command_output(
+        &entry,
+        ShellCommandOutput {
+            success: false,
+            exit_code: Some(7),
+            stdout: String::new(),
+            stderr: "boom".to_string(),
+        },
+        "json_tool",
+    )
+    .expect_err("failed parsed command should error");
+
+    match error {
+        ReadyError::Tool { tool_id, message } => {
+            assert_eq!(tool_id, "json_tool");
+            assert!(message.contains("exit Some(7)"));
+            assert!(message.contains("boom"));
         }
-        other => panic!("expected string success result, got {other:?}"),
+        other => panic!("expected tool error, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_command_output_allows_failed_raw_command_and_combines_streams() {
+    let parsed = ShellToolsModule::parse_command_output(
+        &entry(&["tool"]),
+        ShellCommandOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: "hello".to_string(),
+            stderr: " world".to_string(),
+        },
+        "raw_tool",
+    )
+    .expect("raw output should still succeed");
+
+    assert_eq!(parsed, json!("hello world"));
 }
 
 #[test]
@@ -241,8 +304,7 @@ fn output_parsing_deserializes_supported_values() {
 #[test]
 fn parse_output_parses_int_float_and_bool() {
     assert_eq!(
-        parse_output(&OutputParsing::Int, "42\n", "", "int_tool")
-            .expect("int parse should work"),
+        parse_output(&OutputParsing::Int, "42\n", "", "int_tool").expect("int parse should work"),
         json!(42)
     );
     assert_eq!(
@@ -258,20 +320,59 @@ fn parse_output_parses_int_float_and_bool() {
 }
 
 #[tokio::test]
-async fn execute_tool_parses_simple_json_value() {
+async fn execute_uses_runner_and_parses_output() {
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let runner = Arc::new(RecordingRunner {
+        commands: commands.clone(),
+        output: ShellCommandOutput {
+            success: true,
+            exit_code: Some(0),
+            stdout: r#"{"message":"hello","count":2,"ok":true}"#.to_string(),
+            stderr: String::new(),
+        },
+    });
+
+    let module = ShellToolsModule::with_runner(
+        HashMap::from([(
+            "json_tool".to_string(),
+            ShellToolEntry {
+                description: "Parse json".to_string(),
+                template: echo_template("{message}"),
+                arguments: vec![argument("message", "str", "Message", None)],
+                returns: ToolReturnDescription {
+                    name: Some("output".to_string()),
+                    description: String::new(),
+                    type_name: Some("json".to_string()),
+                    fields: Vec::new(),
+                },
+                active: true,
+                output_parsing: OutputParsing::Json,
+                output_schema: None,
+            },
+        )]),
+        runner,
+    );
+
+    let result = module
+        .execute(&ToolCall {
+            tool_id: "json_tool".to_string(),
+            args: vec![json!("hello")],
+            continuation: None,
+        })
+        .await
+        .expect("execution should succeed");
+
     assert_eq!(
-        parse_output(
-            &OutputParsing::Json,
-            r#"{"message":"hello","count":2,"ok":true}"#,
-            "",
-            "json_tool",
-        )
-        .expect("simple json should parse"),
-        json!({
+        result,
+        ToolResult::Success(json!({
             "message": "hello",
             "count": 2,
             "ok": true
-        })
+        }))
+    );
+    assert_eq!(
+        *commands.lock().expect("commands mutex poisoned"),
+        vec![echo_template("hello")]
     );
 }
 

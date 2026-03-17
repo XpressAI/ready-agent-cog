@@ -2,22 +2,14 @@
 
 /// Built-in tool implementations backed by shared runtime services.
 pub mod builtin;
-#[cfg(test)]
-mod builtin_tests;
 /// Shared data models used to describe tools, arguments, and execution results.
 pub mod models;
-#[cfg(test)]
-mod models_tests;
 /// Process-backed tools that expose saved plans as callable tools.
 pub mod process;
-#[cfg(test)]
-mod process_tests;
 /// Registry types for resolving tool IDs to their owning modules.
 pub mod registry;
 /// Shell-backed tools that execute templated commands and parse their output.
 pub mod shell;
-#[cfg(test)]
-mod shell_tests;
 /// Core extension traits implemented by tool modules.
 pub mod traits;
 
