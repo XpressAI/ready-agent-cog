@@ -1,4 +1,6 @@
 use super::*;
+use crate::tools::shell::parse_output;
+use crate::tools::shell::render_template_part;
 use crate::error::ReadyError;
 use serde_json::Value;
 use serde_json::json;
@@ -39,6 +41,22 @@ fn argument(
 
 fn shell_module(entries: HashMap<String, ShellToolEntry>) -> ShellToolsModule {
     ShellToolsModule::new(entries)
+}
+
+fn echo_template(message: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        vec!["cmd".to_string(), "/c".to_string(), "echo".to_string(), message.to_string()]
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("printf '%s\\n' \"{}\"", message.replace('\\', "\\\\").replace('"', "\\\"")),
+        ]
+    }
 }
 
 fn unique_temp_file(name: &str) -> std::path::PathBuf {
@@ -87,7 +105,9 @@ fn shell_store_save_and_load_round_trip_entries() {
 
 #[test]
 fn list_tools_returns_only_active_entries_with_preserved_fields() {
-    let mut active = entry(&["cmd", "/c", "echo", "hello"]);
+    let active_template = echo_template("hello");
+    let active_parts: Vec<&str> = active_template.iter().map(String::as_str).collect();
+    let mut active = entry(&active_parts);
     active.description = "Echo a line".to_string();
     active.arguments = vec![argument("message", "str", "Message to echo", None)];
     active.returns = ToolReturnDescription {
@@ -97,7 +117,9 @@ fn list_tools_returns_only_active_entries_with_preserved_fields() {
         fields: Vec::new(),
     };
 
-    let mut inactive = entry(&["cmd", "/c", "echo", "nope"]);
+    let inactive_template = echo_template("nope");
+    let inactive_parts: Vec<&str> = inactive_template.iter().map(String::as_str).collect();
+    let mut inactive = entry(&inactive_parts);
     inactive.active = false;
 
     let module = shell_module(HashMap::from([
@@ -115,16 +137,12 @@ fn list_tools_returns_only_active_entries_with_preserved_fields() {
 
 #[tokio::test]
 async fn execute_tool_binds_arguments_and_runs_command() {
+    let template = echo_template("{message}");
     let module = shell_module(HashMap::from([(
         "echo_message".to_string(),
         ShellToolEntry {
             description: "Echo a message".to_string(),
-            template: vec![
-                "cmd".to_string(),
-                "/c".to_string(),
-                "echo".to_string(),
-                "{message}".to_string(),
-            ],
+            template,
             arguments: vec![argument("message", "str", "Message", None)],
             returns: ToolReturnDescription {
                 name: Some("output".to_string()),
@@ -154,40 +172,14 @@ async fn execute_tool_binds_arguments_and_runs_command() {
     }
 }
 
-#[tokio::test]
-async fn execute_tool_reports_missing_placeholder_contextually() {
-    let module = shell_module(HashMap::from([(
-        "grep_search".to_string(),
-        ShellToolEntry {
-            description: String::new(),
-            template: vec![
-                "grep".to_string(),
-                "{pattern}".to_string(),
-                "{path}".to_string(),
-            ],
-            arguments: vec![argument("pattern", "str", "", None)],
-            returns: ToolReturnDescription {
-                name: None,
-                description: String::new(),
-                type_name: Some("str".to_string()),
-                fields: Vec::new(),
-            },
-            active: true,
-            output_parsing: OutputParsing::Raw,
-            output_schema: None,
-        },
-    )]));
-
-    use crate::tools::models::ToolCall;
-    let call = ToolCall {
-        tool_id: "grep_search".to_string(),
-        args: vec![json!("foo")],
-        continuation: None,
-    };
-    let error = module
-        .execute(&call)
-        .await
-        .expect_err("missing placeholder should error");
+#[test]
+fn render_template_part_reports_missing_placeholder_contextually() {
+    let error = render_template_part(
+        "{pattern} {path}",
+        &HashMap::from([("pattern".to_string(), "foo".to_string())]),
+        "grep_search",
+    )
+    .expect_err("missing placeholder should error");
 
     match error {
         ReadyError::Tool { tool_id, message } => {
@@ -246,102 +238,69 @@ fn output_parsing_deserializes_supported_values() {
     );
 }
 
-#[tokio::test]
-async fn execute_tool_parses_int_float_and_bool() {
-    let module = shell_module(HashMap::from([
-        (
-            "int_tool".to_string(),
-            ShellToolEntry {
-                description: String::new(),
-                template: vec![
-                    "cmd".to_string(),
-                    "/c".to_string(),
-                    "echo".to_string(),
-                    "42".to_string(),
-                ],
-                arguments: Vec::new(),
-                returns: ToolReturnDescription {
-                    name: None,
-                    description: String::new(),
-                    type_name: Some("int".to_string()),
-                    fields: Vec::new(),
-                },
-                active: true,
-                output_parsing: OutputParsing::Int,
-                output_schema: None,
-            },
-        ),
-        (
-            "float_tool".to_string(),
-            ShellToolEntry {
-                description: String::new(),
-                template: vec![
-                    "cmd".to_string(),
-                    "/c".to_string(),
-                    "echo".to_string(),
-                    "3.14".to_string(),
-                ],
-                arguments: Vec::new(),
-                returns: ToolReturnDescription {
-                    name: None,
-                    description: String::new(),
-                    type_name: Some("float".to_string()),
-                    fields: Vec::new(),
-                },
-                active: true,
-                output_parsing: OutputParsing::Float,
-                output_schema: None,
-            },
-        ),
-        (
-            "bool_tool".to_string(),
-            ShellToolEntry {
-                description: String::new(),
-                template: vec![
-                    "cmd".to_string(),
-                    "/c".to_string(),
-                    "echo".to_string(),
-                    "yes".to_string(),
-                ],
-                arguments: Vec::new(),
-                returns: ToolReturnDescription {
-                    name: None,
-                    description: String::new(),
-                    type_name: Some("bool".to_string()),
-                    fields: Vec::new(),
-                },
-                active: true,
-                output_parsing: OutputParsing::Bool,
-                output_schema: None,
-            },
-        ),
-    ]));
-
-    use crate::tools::models::ToolCall;
-    let mk = |id: &str| ToolCall {
-        tool_id: id.to_string(),
-        args: vec![],
-        continuation: None,
-    };
+#[test]
+fn parse_output_parses_int_float_and_bool() {
     assert_eq!(
-        module
-            .execute(&mk("int_tool"))
-            .await
+        parse_output(&OutputParsing::Int, "42\n", "", "int_tool")
             .expect("int parse should work"),
-        ToolResult::Success(json!(42))
+        json!(42)
     );
     assert_eq!(
-        module
-            .execute(&mk("float_tool"))
-            .await
+        parse_output(&OutputParsing::Float, "3.14\n", "", "float_tool")
             .expect("float parse should work"),
-        ToolResult::Success(json!(3.14))
+        json!(3.14)
     );
     assert_eq!(
-        module
-            .execute(&mk("bool_tool"))
-            .await
+        parse_output(&OutputParsing::Bool, "yes\n", "", "bool_tool")
             .expect("bool parse should work"),
-        ToolResult::Success(json!(true))
+        json!(true)
+    );
+}
+
+#[tokio::test]
+async fn execute_tool_parses_simple_json_value() {
+    assert_eq!(
+        parse_output(
+            &OutputParsing::Json,
+            r#"{"message":"hello","count":2,"ok":true}"#,
+            "",
+            "json_tool",
+        )
+        .expect("simple json should parse"),
+        json!({
+            "message": "hello",
+            "count": 2,
+            "ok": true
+        })
+    );
+}
+
+#[test]
+fn execute_tool_parses_nested_json_objects_and_arrays() {
+    assert_eq!(
+        parse_output(
+            &OutputParsing::Json,
+            r#"{"user":{"id":7,"profile":{"name":"Ada","roles":["admin","author"]}},"items":[{"name":"hammer","qty":1},{"name":"nails","qty":42}],"flags":[true,false],"meta":{"counts":[1,2,3]}}"#,
+            "",
+            "json_tool",
+        )
+        .expect("nested json should parse"),
+        json!({
+            "user": {
+                "id": 7,
+                "profile": {
+                    "name": "Ada",
+                    "roles": ["admin", "author"]
+                }
+            },
+            "items": [
+                {"name": "hammer", "qty": 1},
+                {"name": "nails", "qty": 42}
+            ],
+            "flags": [true, false],
+            "meta": {
+                "counts": [1, 2, 3]
+            }
+        })
     );
 }

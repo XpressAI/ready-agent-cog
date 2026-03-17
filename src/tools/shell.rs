@@ -149,34 +149,38 @@ impl ToolsModule for ShellToolsModule {
 
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let parsed = match entry.output_parsing {
-                OutputParsing::Raw => Value::String(format!("{}{}", stdout, stderr)),
-                OutputParsing::Json => serde_json::from_str::<Value>(&stdout)?,
-                OutputParsing::Int => {
-                    Value::from(
-                        stdout
-                            .trim()
-                            .parse::<i64>()
-                            .map_err(|err| ReadyError::Tool {
-                                tool_id: tool_id.to_string(),
-                                message: format!("Failed to parse integer output: {err}"),
-                            })?,
-                    )
-                }
-                OutputParsing::Float => Value::from(stdout.trim().parse::<f64>().map_err(
-                    |err| ReadyError::Tool {
-                        tool_id: tool_id.to_string(),
-                        message: format!("Failed to parse float output: {err}"),
-                    },
-                )?),
-                OutputParsing::Bool => Value::Bool(matches!(
-                    stdout.trim().to_ascii_lowercase().as_str(),
-                    "true" | "1" | "yes"
-                )),
-            };
+            let parsed = parse_output(&entry.output_parsing, &stdout, &stderr, tool_id)?;
 
             Ok(ToolResult::Success(parsed))
         })
+    }
+}
+
+pub(crate) fn parse_output(
+    parsing: &OutputParsing,
+    stdout: &str,
+    stderr: &str,
+    tool_id: &str,
+) -> Result<Value> {
+    match parsing {
+        OutputParsing::Raw => Ok(Value::String(format!("{}{}", stdout, stderr))),
+        OutputParsing::Json => Ok(serde_json::from_str::<Value>(stdout)?),
+        OutputParsing::Int => Ok(Value::from(stdout.trim().parse::<i64>().map_err(|err| {
+            ReadyError::Tool {
+                tool_id: tool_id.to_string(),
+                message: format!("Failed to parse integer output: {err}"),
+            }
+        })?)),
+        OutputParsing::Float => Ok(Value::from(stdout.trim().parse::<f64>().map_err(
+            |err| ReadyError::Tool {
+                tool_id: tool_id.to_string(),
+                message: format!("Failed to parse float output: {err}"),
+            },
+        )?)),
+        OutputParsing::Bool => Ok(Value::Bool(matches!(
+            stdout.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes"
+        ))),
     }
 }
 
@@ -187,7 +191,7 @@ fn value_to_template_string(value: &Value) -> String {
     }
 }
 
-fn render_template_part(
+pub(crate) fn render_template_part(
     part: &str,
     bound: &HashMap<String, String>,
     tool_id: &str,
