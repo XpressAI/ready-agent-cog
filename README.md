@@ -1,18 +1,18 @@
 # ready
 
-**AI agents that run like software, not like improv theater.**
+**AI agents that actually follow the script.**
 
-Ready translates plain-English [Standard Operating Procedures](https://en.wikipedia.org/wiki/Standard_operating_procedure) into deterministic programs, then executes them without an LLM in the loop. The LLM's only job is translation — one call to turn your SOP into a plan. A Rust interpreter handles the rest.
+Ready translates plain-English [Standard Operating Procedures](https://en.wikipedia.org/wiki/Standard_operating_procedure) into deterministic programs. The LLM makes one call to convert your SOP into a plan, then gets out of the way. A Rust interpreter runs everything from there.
 
 ## The Problem
 
-The mainstream agent pattern — an LLM reasoning in a loop, deciding what to do next at every step — has three structural flaws:
+The mainstream agent pattern (LLM reasoning in a loop, deciding what to do at every step) has three structural flaws:
 
 1. **Security.** Every piece of data the LLM sees influences its next action. Malicious input can hijack the agent. It's remote code execution as a service.
 2. **Reliability.** LLMs are stochastic. The same workflow may break after a model update. Long processes exhaust the context window.
 3. **Speed & cost.** Every step requires a full LLM round-trip. Tasks a program handles in milliseconds take minutes and burn tokens.
 
-Ready's insight: LLMs are excellent *translators* (description → code), terrible *runtimes*. Use translation once, then execute deterministically.
+Ready's insight: LLMs are good at translation. They make terrible runtimes. So translate once, then run the result without them.
 
 ## Usage
 
@@ -64,7 +64,7 @@ ready run --sop standup_process.txt --tools shell-tools.json --plans-dir ./plans
 
 `read_file`, `read_google_doc`, and `post_to_slack` in this example are user-defined shell tools loaded from [`shell-tools.json`](src/tools/shell.rs). The only built-in tools are `delegate_to_large_language_model`, `extract_from_plaintext`, and `sort_list`.
 
-When the planner emits [`collect_user_input`](src/workflow/planner.rs:158), it is writing a planning-time pseudo-function into the generated Python, not calling a runtime builtin tool. During parsing and execution, that pseudo-call becomes a [`Step::UserInteractionStep`](src/planning/parser/statements.rs:78) handled directly by the [`PlanInterpreter`](src/execution/interpreter.rs:315), which **suspends**, waits for the user to provide the URL, then resumes exactly where it stopped — even if that's hours later.
+When the planner emits [`collect_user_input`](src/workflow/planner.rs:158), it writes a planning-time pseudo-function into the generated Python. During execution, that pseudo-call becomes a [`Step::UserInteractionStep`](src/planning/parser/statements.rs:78) handled by the [`PlanInterpreter`](src/execution/interpreter.rs:315), which **suspends** and waits for the user to provide the URL. It resumes exactly where it left off. Even hours later.
 
 ## Installation
 
@@ -158,7 +158,7 @@ let mut state = executor.execute(&plan, HashMap::new(), None).await?;
 
 while state.status == ExecutionStatus::Suspended {
     let prompt = state.suspension_reason.as_deref().unwrap_or("Input needed");
-    // Obtain the value from a UI, API, email — whatever fits your system
+    // Obtain the value from a UI, API, email, whatever fits your system
     let value = json!("user-provided-answer");
     executor.resume(&plan, &mut state, value).await?;
 }
@@ -234,11 +234,11 @@ SOP (plain English)
         → Interpreter executes deterministically
 ```
 
-The [`SopPlanner`](src/workflow/planner.rs) sends your SOP and tool signatures to the LLM, which generates Python restricted to a small subset: assignments, tool calls, `if`/`elif`/`else`, `for`, `while`, and simple expressions. No imports, no classes, no exceptions, no method calls.
+The [`SopPlanner`](src/workflow/planner.rs) sends your SOP and tool signatures to the LLM, which generates Python restricted to a small subset: assignments, tool calls, `if`/`elif`/`else`, `for`, `while`, and simple expressions. Imports, classes, exceptions, and method calls are all excluded.
 
-The [`parser`](src/planning/parser/mod.rs) converts this Python AST (via [rustpython-parser](https://crates.io/crates/rustpython-parser)) into an [`AbstractPlan`](src/plan/types.rs) — a JSON-serializable intermediate representation. The [`validator`](src/planning/validator/mod.rs) performs static analysis: undefined variables, unknown tools, scope violations. If validation fails, the planner retries with the error message (up to 3 attempts).
+The [`parser`](src/planning/parser/mod.rs) converts this Python AST (via [rustpython-parser](https://crates.io/crates/rustpython-parser)) into an [`AbstractPlan`](src/plan/types.rs), a JSON-serializable intermediate representation. The [`validator`](src/planning/validator/mod.rs) performs static analysis: undefined variables, unknown tools, scope violations. If validation fails, the planner retries with the error message (up to 3 attempts).
 
-The [`PlanInterpreter`](src/execution/interpreter.rs) then runs the plan step-by-step. It evaluates expressions, calls tools, manages control flow — all deterministically. The LLM is not involved.
+The [`PlanInterpreter`](src/execution/interpreter.rs) runs the plan step-by-step: evaluating expressions, calling tools, managing control flow. Pure determinism. The LLM is already done.
 
 ## Key Concepts
 
@@ -246,9 +246,9 @@ The [`PlanInterpreter`](src/execution/interpreter.rs) then runs the plan step-by
 
 **Suspend and resume.** When a tool needs human input or wants to pause, execution records a serializable [`ExecutionState`](src/execution/state.rs:159) and suspends. Hours or days later, you provide the input and execution resumes at the exact instruction pointer.
 
-**Plans as tools.** Plans can be [composed](src/tools/process.rs) — one plan can call another plan as a tool, enabling complex workflows built from simple building blocks.
+**Plans as tools.** Plans can be [composed](src/tools/process.rs). One plan calls another as a tool.
 
-**Shell tools.** Define external tools as [command templates in JSON](src/tools/shell.rs) — no Rust code needed. Ready interpolates arguments and parses output (raw text, JSON, int, float, bool).
+**Shell tools.** Define external tools as [command templates in JSON](src/tools/shell.rs). Ready interpolates arguments and parses output (raw text, JSON, int, float, bool). You write JSON; skip the Rust.
 
 Minimal [`shell-tools.json`](src/tools/shell.rs) example:
 
@@ -275,7 +275,7 @@ Minimal [`shell-tools.json`](src/tools/shell.rs) example:
 }
 ```
 
-**Inspect before execute.** Plans are reviewable JSON artifacts. You can [`ready inspect`](src/main.rs) them, diff them, version-control them. They're not opaque conversation logs.
+**Inspect before execute.** Plans are reviewable JSON artifacts. [`ready inspect`](src/main.rs) them, diff them, version-control them. Every decision is visible before a single tool fires.
 
 **Observer pattern.** Hook into execution via [`ExecutionObserver`](src/execution/observer.rs) to log, trace, or react to step start, completion, suspension, and errors.
 
@@ -285,7 +285,7 @@ Minimal [`shell-tools.json`](src/tools/shell.rs) example:
 |---|---|---|
 | LLM role | Runtime reasoning (every step) | One-time translator |
 | Execution | Stochastic, LLM-in-the-loop | Deterministic interpreter |
-| Loops | Re-engage LLM per iteration | Native — no LLM needed |
+| Loops | Re-engage LLM per iteration | Native loops, no LLM needed |
 | Auditability | Buried in conversation history | Plan inspectable before run |
 | Scale | Context window limits | [1M+ interpreter steps](benches/hanoi_stress.rs) proven |
 | Security | Every input influences decisions | LLM only sees SOP at plan time |
@@ -301,13 +301,11 @@ ready tools   [--tools <file>] [--plans-dir <dir>]
 
 `--tools` points to a [`shell-tools.json`](src/tools/shell.rs) file. If omitted, Ready looks for `shell-tools.json` in the current directory.
 
-`--plans-dir` points to a directory of saved `*_plan.json` files. When provided, Ready loads those plans through [`ProcessToolsModule`](src/tools/process.rs) and registers each saved plan as a callable tool. This allows plans to invoke other pre-built plans as tools, giving you reusable sub-plans without reintroducing an LLM into runtime execution.
+`--plans-dir` points to a directory of saved `*_plan.json` files. Ready loads them via [`ProcessToolsModule`](src/tools/process.rs) and registers each one as a callable tool. Any saved plan in that directory becomes available by name inside other plans.
 
 ```sh
 ready tools --tools shell-tools.json --plans-dir ./plans
 ```
-
-Use [`--plans-dir`](src/main.rs) when you want plan composition: any saved plan in that directory becomes available by its plan name inside other plans.
 
 ## Project Structure
 
