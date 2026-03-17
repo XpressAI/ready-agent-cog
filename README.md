@@ -316,11 +316,6 @@ src/
 ├── main.rs              CLI entry point
 ├── lib.rs               Public API surface
 ├── plan/                AbstractPlan, Step, Expression types
-│   ├── mod.rs
-│   ├── types.rs
-│   ├── step.rs
-│   ├── expression.rs
-│   └── diagnostics.rs
 ├── plan_format.rs       Pretty-print plans as Python-like code
 ├── error.rs             ReadyError enum
 ├── execution/           Deterministic plan interpreter
