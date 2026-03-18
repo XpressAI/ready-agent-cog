@@ -289,6 +289,8 @@ When a tool's stdout is a JSON object or array, set [`output_parsing`](src/tools
 
 Declare the shape of the JSON object in [`returns.fields`](src/tools/models.rs:23). Each entry in `fields` becomes a typed attribute in the generated Python class stub that the planner sees, so the LLM knows which keys to access in the plan.
 
+For arrays of structured objects, keep using `fields` for the element shape and set [`type_name`](src/tools/models.rs:11) to `list[ElementType]`. The runtime already parses arbitrary JSON, and the planner stub generator now emits the element class while preserving the list type in the field or return annotation.
+
 ```json
 {
   "get_weather": {
@@ -331,6 +333,53 @@ def get_weather(city: str) -> WeatherResult:
 ```
 
 The plan can then access fields by attribute: `weather.temperature_c`, `weather.condition`, etc.
+
+Array-of-objects outputs work the same way:
+
+```json
+{
+  "get_latest_transcripts": {
+    "description": "Fetch the latest meeting transcripts",
+    "arguments": [],
+    "template": ["python", "tools/get_latest_transcripts.py"],
+    "returns": {
+      "description": "Latest transcript results",
+      "type_name": "LatestTranscriptsResult",
+      "fields": [
+        {
+          "name": "transcripts",
+          "description": "Array of transcript metadata objects",
+          "type_name": "list[TranscriptFile]",
+          "fields": [
+            { "name": "id", "description": "File ID", "type_name": "str", "fields": [] },
+            { "name": "name", "description": "File name", "type_name": "str", "fields": [] },
+            { "name": "mimeType", "description": "MIME type", "type_name": "str", "fields": [] }
+          ]
+        }
+      ]
+    },
+    "output_parsing": "json",
+    "active": true,
+    "output_schema": null
+  }
+}
+```
+
+The planner then sees:
+
+```python
+class TranscriptFile:
+    id: str        # File ID
+    name: str      # File name
+    mimeType: str  # MIME type
+
+class LatestTranscriptsResult:
+    transcripts: list[TranscriptFile]  # Array of transcript metadata objects
+
+def get_latest_transcripts() -> LatestTranscriptsResult:
+    """Fetch the latest meeting transcripts"""
+    ...
+```
 
 [`output_schema`](src/tools/shell.rs:39) accepts a JSON Schema object or `null`. The field is stored on [`ShellToolEntry`](src/tools/shell.rs:31) but is not validated at runtime; it is reserved for future use.
 

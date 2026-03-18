@@ -27,7 +27,9 @@ impl ToolReturnDescription {
     /// Renders this structured return type as a Python `@dataclass` stub when applicable.
     pub fn to_class_stub(&self) -> Option<String> {
         match (&self.type_name, self.fields.is_empty()) {
-            (Some(type_name), false) => Some(render_class_stub(type_name, &self.fields)),
+            (Some(type_name), false) => {
+                Some(render_class_stub(element_type_name(type_name), &self.fields))
+            }
             _ => None,
         }
     }
@@ -148,6 +150,13 @@ pub fn render_class_stub(type_name: &str, fields: &[FieldDescription]) -> String
     lines.join("\n")
 }
 
+fn element_type_name(type_name: &str) -> &str {
+    type_name
+        .strip_prefix("list[")
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(type_name)
+}
+
 fn collect_class_stubs(
     fields: &[FieldDescription],
     type_name: Option<&str>,
@@ -156,15 +165,20 @@ fn collect_class_stubs(
 ) {
     for field in fields {
         if !field.fields.is_empty() {
-            collect_class_stubs(&field.fields, Some(&field.type_name), seen, out);
+            collect_class_stubs(
+                &field.fields,
+                Some(element_type_name(&field.type_name)),
+                seen,
+                out,
+            );
         }
     }
 
     if let Some(type_name) = type_name
         && !fields.is_empty()
-        && seen.insert(type_name.to_string())
+        && seen.insert(element_type_name(type_name).to_string())
     {
-        out.push(render_class_stub(type_name, fields));
+        out.push(render_class_stub(element_type_name(type_name), fields));
     }
 }
 

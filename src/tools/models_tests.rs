@@ -128,6 +128,101 @@ fn generate_prompt_stubs_nested_types_in_dependency_order() {
 }
 
 #[test]
+fn generate_prompt_stubs_list_typed_field_uses_element_class_name() {
+    let tool = make_tool(
+        "get_latest_transcripts",
+        Some("LatestTranscriptsResult"),
+        vec![FieldDescription {
+            name: "transcripts".to_string(),
+            description: "Array of transcript metadata objects".to_string(),
+            type_name: "list[TranscriptFile]".to_string(),
+            fields: vec![
+                described_field("id", "str", "File ID"),
+                described_field("name", "str", "File name"),
+                described_field("mimeType", "str", "MIME type"),
+            ],
+        }],
+    );
+
+    let result = generate_prompt_stubs(&[tool]);
+
+    assert!(result.contains("class TranscriptFile:"));
+    assert!(!result.contains("class list[TranscriptFile]:"));
+    assert!(result.contains("transcripts: list[TranscriptFile]  # Array of transcript metadata objects"));
+}
+
+#[test]
+fn top_level_list_return_uses_element_class_name() {
+    let returns = ToolReturnDescription {
+        name: None,
+        description: "Latest transcript results".to_string(),
+        type_name: Some("list[TranscriptFile]".to_string()),
+        fields: vec![
+            described_field("id", "str", "File ID"),
+            described_field("name", "str", "File name"),
+            described_field("mimeType", "str", "MIME type"),
+        ],
+    };
+
+    assert_eq!(
+        returns.to_class_stub(),
+        Some(
+            "class TranscriptFile:\n    id: str  # File ID\n    name: str  # File name\n    mimeType: str  # MIME type"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn generate_prompt_stubs_nested_lists_emit_both_element_classes() {
+    let tool = make_tool(
+        "get_nested_transcripts",
+        Some("list[TranscriptBatch]"),
+        vec![FieldDescription {
+            name: "transcripts".to_string(),
+            description: "Transcript files in the batch".to_string(),
+            type_name: "list[TranscriptFile]".to_string(),
+            fields: vec![field("id", "str")],
+        }],
+    );
+
+    let result = generate_prompt_stubs(&[tool]);
+
+    assert!(result.contains("class TranscriptFile:"));
+    assert!(result.contains("class TranscriptBatch:"));
+    assert!(!result.contains("class list[TranscriptBatch]:"));
+    assert!(!result.contains("class list[TranscriptFile]:"));
+}
+
+#[test]
+fn generate_prompt_stubs_deduplicates_list_and_bare_element_class_names() {
+    let listed = make_tool(
+        "list_transcripts",
+        Some("LatestTranscriptsResult"),
+        vec![FieldDescription {
+            name: "transcripts".to_string(),
+            description: String::new(),
+            type_name: "list[TranscriptFile]".to_string(),
+            fields: vec![field("id", "str")],
+        }],
+    );
+    let single = make_tool(
+        "get_transcript",
+        Some("TranscriptEnvelope"),
+        vec![FieldDescription {
+            name: "transcript".to_string(),
+            description: String::new(),
+            type_name: "TranscriptFile".to_string(),
+            fields: vec![field("id", "str")],
+        }],
+    );
+
+    let result = generate_prompt_stubs(&[listed, single]);
+
+    assert_eq!(result.matches("class TranscriptFile:").count(), 1);
+}
+
+#[test]
 fn to_python_stub_unchanged_for_simple_tools() {
     let tool = ToolDescription {
         id: "summarize".to_string(),
