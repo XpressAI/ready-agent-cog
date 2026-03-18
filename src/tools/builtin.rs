@@ -76,13 +76,13 @@ impl BuiltinToolsModule {
             description: "Extracts any information from a string. Use this whenever you need to pull, parse, or read anything out of a string value — for example extracting a name, date, number, URL, status, or any other field; filtering or selecting items from text; converting free-form text into a typed value; or answering a question about the contents of a string. Pass the string as plain_text and a JSON Schema describing what you want back as schema.".to_string(),
             arguments: vec![
                 ToolArgumentDescription {
-                    name: "system_prompt".to_string(),
+                    name: "plaintext".to_string(),
                     description: "Plain text that contains information to extract.".to_string(),
                     type_name: "str".to_string(),
                     default: None,
                 },
                 ToolArgumentDescription {
-                    name: "user_prompt".to_string(),
+                    name: "schema".to_string(),
                     description: "JSON Schema definition that specifies the expected output structure.".to_string(),
                     type_name: "dict".to_string(),
                     default: None,

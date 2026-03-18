@@ -79,6 +79,20 @@ pub fn evaluate_expression(expr: &Expression, variables: &HashMap<String, Value>
             let value = evaluate_expression(operand, variables)?;
             Ok(Value::Bool(!is_truthy(&value)))
         }
+        Expression::DictExpression { entries } => {
+            let mut map = serde_json::Map::new();
+            for (key, value_expr) in entries {
+                map.insert(key.clone(), evaluate_expression(value_expr, variables)?);
+            }
+            Ok(Value::Object(map))
+        }
+        Expression::ArrayExpression { elements } => {
+            let items = elements
+                .iter()
+                .map(|e| evaluate_expression(e, variables))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Value::Array(items))
+        }
     }
 }
 

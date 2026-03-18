@@ -17,7 +17,7 @@ pub(crate) fn validate_tool_reference(
     {
         diagnostics.push(PlanDiagnostic {
             severity: DiagnosticSeverity::Error,
-            message: format!("Unknown tool_id '{tool_id}'"),
+            message: format!("NameError: function '{tool_id}' is not defined"),
             variable_name: None,
         });
     }

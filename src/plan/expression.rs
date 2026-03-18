@@ -218,4 +218,10 @@ pub enum Expression {
     },
     /// Negates the truthiness of a nested expression.
     Not { operand: Box<Expression> },
+    /// Constructs an object from string keys mapped to arbitrary expressions.
+    DictExpression {
+        entries: Vec<(String, Expression)>,
+    },
+    /// Constructs an array from arbitrary expressions.
+    ArrayExpression { elements: Vec<Expression> },
 }

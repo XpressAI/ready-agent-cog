@@ -19,8 +19,7 @@ pub(crate) use conditions::convert_condition;
 pub(crate) use expressions::convert_expression;
 pub(crate) use functions::find_main;
 pub(crate) use literals::{
-    constant_to_literal, expression_to_literal_value, extract_string_literal,
-    extract_subscript_key, literal_dict,
+    constant_to_literal, extract_json_object_key, extract_string_literal, extract_subscript_key,
 };
 pub(crate) use names::{expression_name, extract_name_target, statement_name};
 pub(crate) use statements::convert_body;

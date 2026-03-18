@@ -5,8 +5,7 @@ use crate::plan::{
 use rustpython_parser::ast;
 
 use super::{
-    constant_to_literal, expression_name, expression_to_literal_value, extract_subscript_key,
-    literal_dict,
+    constant_to_literal, expression_name, extract_json_object_key, extract_subscript_key,
 };
 
 pub(crate) fn convert_expression(expr: &ast::Expr) -> Result<Expression> {
@@ -41,24 +40,9 @@ pub(crate) fn convert_expression(expr: &ast::Expr) -> Result<Expression> {
                 .map(convert_expression)
                 .collect::<Result<Vec<_>>>()?,
         }),
-        ast::Expr::List(list) => Ok(Expression::Literal {
-            value: LiteralValue::Array(
-                list.elts
-                    .iter()
-                    .map(expression_to_literal_value)
-                    .collect::<Result<Vec<_>>>()?,
-            ),
-        }),
-        ast::Expr::Tuple(tuple) => Ok(Expression::Literal {
-            value: LiteralValue::Array(
-                tuple
-                    .elts
-                    .iter()
-                    .map(expression_to_literal_value)
-                    .collect::<Result<Vec<_>>>()?,
-            ),
-        }),
-        ast::Expr::Dict(dict) => literal_dict(dict),
+        ast::Expr::List(list) => convert_array(&list.elts),
+        ast::Expr::Tuple(tuple) => convert_array(&tuple.elts),
+        ast::Expr::Dict(dict) => convert_dict(dict),
         other => Err(ReadyError::PlanParsing(format!(
             "Unsupported expression type: {}",
             expression_name(other)
@@ -139,6 +123,65 @@ fn unwind_access_chain(expr: &ast::Expr) -> Result<(String, Vec<Accessor>)> {
             }
         }
     }
+}
+
+fn convert_array(elements: &[ast::Expr]) -> Result<Expression> {
+    let converted: Vec<Expression> = elements
+        .iter()
+        .map(convert_expression)
+        .collect::<Result<Vec<_>>>()?;
+
+    // If all elements are literals, keep the compact Literal representation
+    if let Some(literals) = all_literals(&converted) {
+        return Ok(Expression::Literal {
+            value: LiteralValue::Array(literals),
+        });
+    }
+
+    Ok(Expression::ArrayExpression {
+        elements: converted,
+    })
+}
+
+fn convert_dict(dict: &ast::ExprDict) -> Result<Expression> {
+    let mut entries = Vec::new();
+    for (key, value) in dict.keys.iter().zip(dict.values.iter()) {
+        let Some(key_expr) = key else {
+            return Err(ReadyError::PlanParsing(
+                "Dictionary unpacking is not supported".to_string(),
+            ));
+        };
+        let key = extract_json_object_key(key_expr)?;
+        entries.push((key, convert_expression(value)?));
+    }
+
+    // If all values are literals, keep the compact Literal representation
+    let all_literal = entries.iter().all(|(_, v)| matches!(v, Expression::Literal { .. }));
+    if all_literal {
+        let object = entries
+            .into_iter()
+            .map(|(k, v)| match v {
+                Expression::Literal { value } => (k, value),
+                _ => unreachable!(),
+            })
+            .collect();
+        return Ok(Expression::Literal {
+            value: LiteralValue::Object(object),
+        });
+    }
+
+    Ok(Expression::DictExpression { entries })
+}
+
+/// Returns `Some(literals)` if every expression is a `Literal`, otherwise `None`.
+fn all_literals(exprs: &[Expression]) -> Option<Vec<LiteralValue>> {
+    exprs
+        .iter()
+        .map(|e| match e {
+            Expression::Literal { value } => Some(value.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn collapse_add_chain(expr: &ast::Expr) -> Vec<&ast::Expr> {

@@ -41,7 +41,7 @@ fn error_for_reference_to_never_defined_variable() {
             .iter()
             .any(|d| d.variable_name.as_deref() == Some("unknown_var"))
     );
-    assert!(errors.iter().any(|d| d.message.contains("not defined")));
+    assert!(errors.iter().any(|d| d.message.contains("NameError")));
 }
 
 #[test]
@@ -420,6 +420,7 @@ fn unknown_tool_produces_error_diagnostic() {
 
     let diagnostics = validate_plan(&plan, &[]);
     assert!(diagnostics.iter().any(|d| {
-        d.severity == DiagnosticSeverity::Error && d.message.contains("Unknown tool_id 'unknown'")
+        d.severity == DiagnosticSeverity::Error
+            && d.message.contains("NameError: function 'unknown' is not defined")
     }));
 }

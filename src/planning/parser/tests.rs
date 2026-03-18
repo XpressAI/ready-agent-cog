@@ -1039,3 +1039,72 @@ fn unsupported_slice_raises() {
         matches!(error, ReadyError::PlanParsing(message) if message.contains("Unsupported subscript slice type"))
     );
 }
+
+#[test]
+fn dict_with_access_path_value_produces_dict_expression() {
+    let plan = parse(&wrap_in_main(
+        "result = some_tool(\"prompt\", {\"plain_text\": message.text, \"schema\": {\"type\": \"string\"}})",
+    ));
+    let Step::ToolStep { arguments, .. } = &plan.steps[0] else {
+        panic!("expected tool step");
+    };
+    assert_eq!(arguments.len(), 2);
+    let Expression::DictExpression { entries } = &arguments[1] else {
+        panic!("expected DictExpression, got {:?}", arguments[1]);
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0, "plain_text");
+    assert_eq!(
+        entries[0].1,
+        Expression::AccessPath {
+            variable_name: "message".to_string(),
+            accessors: vec![Accessor::Attribute("text".to_string())],
+        }
+    );
+    // The nested schema dict is all literals, so it stays as a Literal
+    assert!(matches!(entries[1].1, Expression::Literal { .. }));
+}
+
+#[test]
+fn dict_with_all_literal_values_stays_as_literal() {
+    let plan = parse(&wrap_in_main("x = {\"a\": 1, \"b\": \"hello\"}"));
+    let Step::AssignStep { value, .. } = &plan.steps[0] else {
+        panic!("expected assign step");
+    };
+    assert!(
+        matches!(value, Expression::Literal { value: crate::plan::LiteralValue::Object(_) }),
+        "expected Literal::Object, got {value:?}"
+    );
+}
+
+#[test]
+fn list_with_access_path_element_produces_array_expression() {
+    let plan = parse(&wrap_in_main("x = [item.name, \"literal\"]"));
+    let Step::AssignStep { value, .. } = &plan.steps[0] else {
+        panic!("expected assign step");
+    };
+    let Expression::ArrayExpression { elements } = value else {
+        panic!("expected ArrayExpression, got {value:?}");
+    };
+    assert_eq!(elements.len(), 2);
+    assert_eq!(
+        elements[0],
+        Expression::AccessPath {
+            variable_name: "item".to_string(),
+            accessors: vec![Accessor::Attribute("name".to_string())],
+        }
+    );
+    assert_eq!(elements[1], literal(json!("literal")));
+}
+
+#[test]
+fn list_with_all_literal_elements_stays_as_literal() {
+    let plan = parse(&wrap_in_main("x = [1, 2, 3]"));
+    let Step::AssignStep { value, .. } = &plan.steps[0] else {
+        panic!("expected assign step");
+    };
+    assert!(
+        matches!(value, Expression::Literal { value: crate::plan::LiteralValue::Array(_) }),
+        "expected Literal::Array, got {value:?}"
+    );
+}

@@ -31,5 +31,15 @@ pub(crate) fn collect_expression_variables_into(expr: &Expression, found: &mut H
             }
         }
         Expression::Literal { .. } => {}
+        Expression::DictExpression { entries } => {
+            for (_, value_expr) in entries {
+                collect_expression_variables_into(value_expr, found);
+            }
+        }
+        Expression::ArrayExpression { elements } => {
+            for element in elements {
+                collect_expression_variables_into(element, found);
+            }
+        }
     }
 }

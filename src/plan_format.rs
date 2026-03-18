@@ -104,6 +104,23 @@ pub fn format_expression(expr: &Expression) -> String {
             .collect::<Vec<_>>()
             .join(&format!(" {} ", operator.as_str())),
         Expression::Not { operand } => format!("not {}", format_expression(operand)),
+        Expression::DictExpression { entries } => {
+            let pairs: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}: {}",
+                        serde_json::to_string(k).unwrap_or_else(|_| format!("\"{}\"", k)),
+                        format_expression(v)
+                    )
+                })
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        Expression::ArrayExpression { elements } => {
+            let items: Vec<String> = elements.iter().map(format_expression).collect();
+            format!("[{}]", items.join(", "))
+        }
     }
 }
 

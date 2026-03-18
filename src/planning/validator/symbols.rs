@@ -80,7 +80,7 @@ fn check_step_references(
         if !defined.contains(iterable_variable) {
             diagnostics.push(PlanDiagnostic {
                 severity: DiagnosticSeverity::Error,
-                message: format!("Variable '{iterable_variable}' is not defined before it is used"),
+                message: format!("NameError: name '{iterable_variable}' is not defined"),
                 variable_name: Some(iterable_variable.clone()),
             });
         }
@@ -91,7 +91,7 @@ fn check_step_references(
         if !defined.contains(&variable) {
             diagnostics.push(PlanDiagnostic {
                 severity: DiagnosticSeverity::Error,
-                message: format!("Variable '{variable}' is not defined before it is used"),
+                message: format!("NameError: name '{variable}' is not defined"),
                 variable_name: Some(variable),
             });
         }

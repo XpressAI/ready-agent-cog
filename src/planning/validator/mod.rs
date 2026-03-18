@@ -47,7 +47,7 @@ pub fn validate_plan(
         {
             diagnostics.push(PlanDiagnostic {
                 severity: DiagnosticSeverity::Warning,
-                message: format!("Variable '{output}' is assigned but never used"),
+                message: format!("Warning: local variable '{output}' is assigned to but never used"),
                 variable_name: Some(output.to_string()),
             });
         }

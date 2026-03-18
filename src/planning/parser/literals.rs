@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use rustpython_parser::ast;
 use serde_json::Number;
 
@@ -95,18 +93,3 @@ pub(crate) fn constant_to_literal(constant: &ast::Constant) -> Result<LiteralVal
     }
 }
 
-pub(crate) fn literal_dict(dict: &ast::ExprDict) -> Result<Expression> {
-    let mut object = BTreeMap::new();
-    for (key, value) in dict.keys.iter().zip(dict.values.iter()) {
-        let Some(key_expr) = key else {
-            return Err(ReadyError::PlanParsing(
-                "Dictionary unpacking is not supported".to_string(),
-            ));
-        };
-        let key = extract_json_object_key(key_expr)?;
-        object.insert(key, expression_to_literal_value(value)?);
-    }
-    Ok(Expression::Literal {
-        value: LiteralValue::Object(object),
-    })
-}
