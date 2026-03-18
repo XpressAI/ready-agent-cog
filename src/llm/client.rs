@@ -102,11 +102,10 @@ impl OpenAiClient {
             "requesting structured LLM extraction"
         );
 
-        // OpenAI strict mode requires additionalProperties: false at every object level.
+        // OpenAI strict mode requires additionalProperties: false and every property key
+        // listed in `required` at every object level.
         let mut schema = json_schema.clone();
-        if let Some(obj) = schema.as_object_mut() {
-            obj.insert("additionalProperties".to_string(), Value::Bool(false));
-        }
+        enforce_strict_schema(&mut schema);
 
         let raw = self
             .post_chat_completion(json!({
@@ -205,6 +204,27 @@ impl LlmClient for OpenAiClient {
                 warn!(error = %error, "structured extraction failed; retrying with fallback mode");
                 self.complete_with_fallback(system_prompt, user_prompt, json_schema)
                     .await
+            }
+        }
+    }
+}
+
+/// Recursively enforces OpenAI strict-mode schema requirements:
+/// - `additionalProperties: false` on every object
+/// - `required` listing every key in `properties`
+fn enforce_strict_schema(schema: &mut Value) {
+    let Some(obj) = schema.as_object_mut() else { return };
+
+    if let Some(props) = obj.get("properties").cloned() {
+        if let Some(keys) = props.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()) {
+            obj.insert("required".to_string(), Value::Array(keys.into_iter().map(Value::String).collect()));
+        }
+        obj.insert("additionalProperties".to_string(), Value::Bool(false));
+
+        // Recurse into each property value.
+        if let Some(props_mut) = obj.get_mut("properties").and_then(Value::as_object_mut) {
+            for val in props_mut.values_mut() {
+                enforce_strict_schema(val);
             }
         }
     }
