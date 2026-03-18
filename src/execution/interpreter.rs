@@ -226,6 +226,7 @@ impl PlanInterpreter {
                 ip,
                 &mut state.interpreter_state,
             ),
+            Step::BreakStep => handle_break_step(&self.plan.steps, internal_state, ip),
         }
     }
 
@@ -454,6 +455,34 @@ pub(crate) fn handle_user_interaction_step(
         suspend: true,
         suspend_reason: Some(prompt.to_string()),
     })
+}
+
+pub(crate) fn handle_break_step(
+    plan_steps: &[Step],
+    internal_state: &mut InternalState,
+    ip: &mut InstructionPointer,
+) -> Result<StepResult> {
+    // Walk up the path to find the nearest enclosing loop (LoopStep or WhileStep).
+    // For each level, clean up any switch branch state, then advance past the loop.
+    for depth in (0..ip.path.len().saturating_sub(1)).rev() {
+        let ancestor_path = &ip.path[..=depth];
+        let ancestor = step_at_path(plan_steps, ancestor_path, internal_state);
+        if matches!(ancestor, Some(Step::LoopStep { .. }) | Some(Step::WhileStep { .. })) {
+            let loop_path = ancestor_path.to_vec();
+            internal_state.loops.remove(&loop_path);
+            internal_state.whiles.remove(&loop_path);
+            // Clean up any switch branch state for scopes between break and the loop.
+            for inner_depth in (depth + 1)..ip.path.len().saturating_sub(1) {
+                internal_state.branches.remove(&ip.path[..=inner_depth].to_vec());
+            }
+            ip.path = loop_path;
+            ip.advance();
+            return Ok(StepResult::default());
+        }
+    }
+    Err(ReadyError::PlanParsing(
+        "break statement used outside of a loop".to_string(),
+    ))
 }
 
 fn instruction_pointer(state: &InterpreterState) -> Result<InstructionPointer> {

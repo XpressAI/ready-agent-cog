@@ -58,7 +58,10 @@ pub(crate) fn walk_steps(
                     available_tool_ids,
                 );
             }
-            Step::AssignStep { .. } | Step::ToolStep { .. } | Step::UserInteractionStep { .. } => {}
+            Step::AssignStep { .. }
+            | Step::ToolStep { .. }
+            | Step::UserInteractionStep { .. }
+            | Step::BreakStep => {}
         }
     }
 }
@@ -111,6 +114,6 @@ fn referenced_variables(step: &Step) -> HashSet<String> {
             .flat_map(collect_expression_variables)
             .collect(),
         Step::WhileStep { condition, .. } => collect_expression_variables(condition),
-        Step::LoopStep { .. } | Step::UserInteractionStep { .. } => HashSet::new(),
+        Step::LoopStep { .. } | Step::UserInteractionStep { .. } | Step::BreakStep => HashSet::new(),
     }
 }

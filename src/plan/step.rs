@@ -67,4 +67,6 @@ pub enum Step {
         prompt: String,
         output_variable: Option<String>,
     },
+    /// Exits the nearest enclosing loop immediately.
+    BreakStep,
 }

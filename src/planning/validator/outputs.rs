@@ -9,7 +9,7 @@ pub(crate) fn output_variable(step: &Step) -> Option<&str> {
         | Step::UserInteractionStep {
             output_variable, ..
         } => output_variable.as_deref(),
-        Step::SwitchStep { .. } | Step::LoopStep { .. } | Step::WhileStep { .. } => None,
+        Step::SwitchStep { .. } | Step::LoopStep { .. } | Step::WhileStep { .. } | Step::BreakStep => None,
     }
 }
 
@@ -22,6 +22,7 @@ pub(crate) fn last_output_variable(steps: &[Step]) -> Option<String> {
         Step::SwitchStep { .. }
         | Step::LoopStep { .. }
         | Step::WhileStep { .. }
-        | Step::UserInteractionStep { .. } => None,
+        | Step::UserInteractionStep { .. }
+        | Step::BreakStep => None,
     })
 }

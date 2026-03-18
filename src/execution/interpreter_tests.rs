@@ -1265,3 +1265,82 @@ async fn multiple_suspend_resume_cycles_collect_values() {
         vec![json!("value_1"), json!("value_2")]
     );
 }
+
+#[tokio::test]
+async fn break_exits_for_loop_early() {
+    // Loop over [1, 2, 3]; break when item == 2; last should be 1 (not 3)
+    let registry = Arc::new(InMemoryToolRegistry::new());
+    let plan = plan(vec![
+        assign("items", json!([1, 2, 3])),
+        assign("last", json!(0)),
+        Step::LoopStep {
+            iterable_variable: "items".to_string(),
+            item_variable: "item".to_string(),
+            body: vec![
+                Step::SwitchStep {
+                    branches: vec![ConditionalBranch {
+                        kind: BranchKind::If,
+                        condition: Some(Expression::Comparison {
+                            operator: ComparisonOperator::Equal,
+                            left: Box::new(access("item")),
+                            right: Box::new(expr(json!(2))),
+                        }),
+                        steps: vec![Step::BreakStep],
+                    }],
+                },
+                assign_ref("last", "item"),
+            ],
+        },
+    ]);
+    let state = execute_plan(registry, &plan)
+        .await
+        .expect("plan should execute");
+    assert_eq!(state.status, ExecutionStatus::Completed);
+    assert_eq!(state.interpreter_state.variables.get("last"), Some(&json!(1)));
+}
+
+#[tokio::test]
+async fn break_exits_while_loop_early() {
+    // While counter > 0: if counter == 2 break; counter -= 1 (simulated via assign)
+    // Start at 3, break at 2, so counter stays 2 after the loop
+    let registry = Arc::new(InMemoryToolRegistry::new());
+    let plan = plan(vec![
+        assign("counter", json!(3)),
+        Step::WhileStep {
+            condition: Expression::Comparison {
+                operator: ComparisonOperator::GreaterThan,
+                left: Box::new(access("counter")),
+                right: Box::new(expr(json!(0))),
+            },
+            body: vec![
+                Step::SwitchStep {
+                    branches: vec![ConditionalBranch {
+                        kind: BranchKind::If,
+                        condition: Some(Expression::Comparison {
+                            operator: ComparisonOperator::Equal,
+                            left: Box::new(access("counter")),
+                            right: Box::new(expr(json!(2))),
+                        }),
+                        steps: vec![Step::BreakStep],
+                    }],
+                },
+                assign_expr(
+                    "counter",
+                    Expression::BinaryExpression {
+                        operator: crate::plan::BinaryOperator::Subtract,
+                        left: Box::new(access("counter")),
+                        right: Box::new(expr(json!(1))),
+                    },
+                ),
+            ],
+        },
+    ]);
+    let state = execute_plan(registry, &plan)
+        .await
+        .expect("plan should execute");
+    assert_eq!(state.status, ExecutionStatus::Completed);
+    assert_eq!(
+        state.interpreter_state.variables.get("counter"),
+        Some(&json!(2))
+    );
+}

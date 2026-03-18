@@ -113,6 +113,7 @@ pub(crate) fn step_type_name(step: &Step) -> &'static str {
         Step::LoopStep { .. } => "LoopStep",
         Step::WhileStep { .. } => "WhileStep",
         Step::UserInteractionStep { .. } => "UserInteractionStep",
+        Step::BreakStep => "BreakStep",
     }
 }
 

@@ -1108,3 +1108,30 @@ fn list_with_all_literal_elements_stays_as_literal() {
         "expected Literal::Array, got {value:?}"
     );
 }
+
+#[test]
+fn break_in_for_loop_produces_break_step() {
+    let plan = parse(&wrap_in_main(
+        "for item in items:\n    if item:\n        break",
+    ));
+    let Step::LoopStep { body, .. } = &plan.steps[0] else {
+        panic!("expected loop step");
+    };
+    let Step::SwitchStep { branches } = &body[0] else {
+        panic!("expected switch step");
+    };
+    assert!(matches!(
+        branch_by_kind(branches, BranchKind::If).steps[0],
+        Step::BreakStep
+    ));
+}
+
+#[test]
+fn break_in_while_loop_produces_break_step() {
+    let plan = parse(&wrap_in_main("while running:\n    break"));
+    let Step::WhileStep { body, .. } = &plan.steps[0] else {
+        panic!("expected while step");
+    };
+    assert_eq!(body.len(), 1);
+    assert!(matches!(body[0], Step::BreakStep));
+}

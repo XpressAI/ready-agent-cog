@@ -196,6 +196,7 @@ fn format_steps(steps: &[Step], indent: usize) -> Vec<String> {
                     None => lines.push(format!("{}{}", prefix, call)),
                 }
             }
+            Step::BreakStep => lines.push(format!("{}break", prefix)),
         }
     }
 

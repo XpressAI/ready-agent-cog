@@ -50,7 +50,7 @@ fn collect_tool_ids_from_steps(steps: &[Step], ids: &mut HashSet<String>) {
             Step::LoopStep { body, .. } | Step::WhileStep { body, .. } => {
                 collect_tool_ids_from_steps(body, ids);
             }
-            Step::AssignStep { .. } | Step::UserInteractionStep { .. } => {}
+            Step::AssignStep { .. } | Step::UserInteractionStep { .. } | Step::BreakStep => {}
         }
     }
 }

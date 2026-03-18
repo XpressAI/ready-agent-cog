@@ -20,6 +20,7 @@ fn convert_statement(statement: &ast::Stmt) -> Option<Result<Step>> {
         ast::Stmt::If(if_stmt) => convert_if(if_stmt),
         ast::Stmt::For(for_stmt) => convert_for(for_stmt),
         ast::Stmt::While(while_stmt) => convert_while(while_stmt),
+        ast::Stmt::Break(_) => return Some(Ok(Step::BreakStep)),
         ast::Stmt::Return(_)
         | ast::Stmt::Import(_)
         | ast::Stmt::ImportFrom(_)
