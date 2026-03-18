@@ -27,7 +27,7 @@ fn convert_statement(statement: &ast::Stmt) -> Option<Result<Step>> {
             return None;
         }
         other => Err(ReadyError::PlanParsing(format!(
-            "Unsupported AST statement: {}",
+            "'{}' is not supported — only assignments, tool calls, if/elif/else, for/while loops, pass, and return are allowed",
             statement_name(other)
         ))),
     })
@@ -152,7 +152,7 @@ fn convert_for(for_stmt: &ast::StmtFor) -> Result<Step> {
         ast::Expr::Name(name) => name.id.to_string(),
         other => {
             return Err(ReadyError::PlanParsing(format!(
-                "Unsupported for-loop iterable: {} (only simple Name iterables are supported)",
+                "for-loop iterable must be a simple variable name, not a '{}' — assign it to a variable first",
                 expression_name(other)
             )));
         }

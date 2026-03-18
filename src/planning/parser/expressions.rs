@@ -44,7 +44,7 @@ pub(crate) fn convert_expression(expr: &ast::Expr) -> Result<Expression> {
         ast::Expr::Tuple(tuple) => convert_array(&tuple.elts),
         ast::Expr::Dict(dict) => convert_dict(dict),
         other => Err(ReadyError::PlanParsing(format!(
-            "Unsupported expression type: {}",
+            "'{}' is not supported — only literals, variable names, attribute/index access, arithmetic, boolean expressions, f-strings, lists, and dicts are allowed",
             expression_name(other)
         ))),
     }
@@ -83,7 +83,7 @@ fn convert_unary_expression(unary: &ast::ExprUnaryOp) -> Result<Expression> {
             operand: Box::new(convert_expression(&unary.operand)?),
         }),
         _ => Err(ReadyError::PlanParsing(format!(
-            "Unsupported unary operator: {:?}",
+            "unary operator '{:?}' is not supported — only unary + and - are allowed",
             unary.op
         ))),
     }
@@ -117,7 +117,7 @@ fn unwind_access_chain(expr: &ast::Expr) -> Result<(String, Vec<Accessor>)> {
             }
             other => {
                 return Err(ReadyError::PlanParsing(format!(
-                    "Unsupported access chain node: {}",
+                    "access chain must start from a variable name, not a '{}' — only `var.attr` or `var[key]` chains are allowed",
                     expression_name(other)
                 )));
             }
@@ -213,7 +213,7 @@ fn binary_operator(operator: &ast::Operator) -> Result<BinaryOperator> {
         ast::Operator::Pow => Ok(BinaryOperator::Power),
         ast::Operator::FloorDiv => Ok(BinaryOperator::FloorDivide),
         other => Err(ReadyError::PlanParsing(format!(
-            "Unsupported binary operator: {:?}",
+            "binary operator '{:?}' is not supported — allowed operators are +, -, *, /, //, %, **",
             other
         ))),
     }
