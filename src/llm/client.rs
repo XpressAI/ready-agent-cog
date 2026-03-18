@@ -12,6 +12,7 @@ use crate::llm::traits::LlmClient;
 
 const DEFAULT_MODEL: &str = "gpt-4o";
 const DEFAULT_API_BASE: &str = "https://api.openai.com/v1";
+const DEFAULT_TEMPERATURE: f32 = 0.0;
 
 #[derive(Debug, Clone)]
 /// HTTP client for OpenAI-compatible APIs with configurable model, base URL, and API key.
@@ -101,9 +102,16 @@ impl OpenAiClient {
             "requesting structured LLM extraction"
         );
 
+        // OpenAI strict mode requires additionalProperties: false at every object level.
+        let mut schema = json_schema.clone();
+        if let Some(obj) = schema.as_object_mut() {
+            obj.insert("additionalProperties".to_string(), Value::Bool(false));
+        }
+
         let raw = self
             .post_chat_completion(json!({
                 "model": &self.model,
+                "temperature": DEFAULT_TEMPERATURE,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
@@ -113,7 +121,7 @@ impl OpenAiClient {
                     "json_schema": {
                         "name": "extraction",
                         "strict": true,
-                        "schema": json_schema
+                        "schema": schema
                     }
                 }
             }))
@@ -173,6 +181,7 @@ impl LlmClient for OpenAiClient {
         trace!(system_prompt = system_prompt, user_prompt = user_prompt, "requesting text completion from LLM");
         self.post_chat_completion(json!({
             "model": &self.model,
+            "temperature": DEFAULT_TEMPERATURE,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
