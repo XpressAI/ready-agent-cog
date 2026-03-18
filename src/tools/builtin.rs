@@ -76,13 +76,19 @@ impl BuiltinToolsModule {
             description: "Extracts any information from a string. Use this whenever you need to pull, parse, or read anything out of a string value — for example extracting a name, date, number, URL, status, or any other field; filtering or selecting items from text; converting free-form text into a typed value; or answering a question about the contents of a string. Pass the string as plain_text and a JSON Schema describing what you want back as schema.".to_string(),
             arguments: vec![
                 ToolArgumentDescription {
+                    name: "system_prompt".to_string(),
+                    description: "Plain text that contains information to extract.".to_string(),
+                    type_name: "str".to_string(),
+                    default: None,
+                },
+                ToolArgumentDescription {
                     name: "plaintext".to_string(),
                     description: "Plain text that contains information to extract.".to_string(),
                     type_name: "str".to_string(),
                     default: None,
                 },
                 ToolArgumentDescription {
-                    name: "schema".to_string(),
+                    name: "json_schema".to_string(),
                     description: "JSON Schema definition that specifies the expected output structure.".to_string(),
                     type_name: "dict".to_string(),
                     default: None,
@@ -171,12 +177,12 @@ impl ToolsModule for BuiltinToolsModule {
                     if args.len() < 3 {
                         return Err(ReadyError::Tool {
                             tool_id: tool_id.to_string(),
-                            message: "Expected arguments: system_prompt, user_prompt, json_schema"
+                            message: "Expected arguments: system_prompt, plaintext, json_schema"
                                 .to_string(),
                         });
                     }
                     let system_prompt = Self::value_as_str(&args[0], tool_id, "system_prompt")?;
-                    let user_prompt = Self::value_as_str(&args[1], tool_id, "user_prompt")?;
+                    let user_prompt = Self::value_as_str(&args[1], tool_id, "plaintext")?;
                     let schema = &args[2];
                     let output = self
                         .llm

@@ -103,7 +103,7 @@ fn convert_assignment_value(output_variable: Option<String>, value: &ast::Expr) 
             value: convert_expression(value)?,
         }),
         None => Err(ReadyError::PlanParsing(format!(
-            "Unsupported expression statement type: {}",
+            "bare '{}' is not allowed as a statement — assign the result to a variable or use a tool call",
             expression_name(value)
         ))),
     }

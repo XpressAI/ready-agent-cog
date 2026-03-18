@@ -94,14 +94,14 @@ fn extract_from_plaintext_signature() {
             .iter()
             .map(|arg| arg.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["system_prompt", "user_prompt"]
+        vec!["system_prompt", "plaintext", "json_schema"]
     );
     assert_eq!(
         tool.arguments
             .iter()
             .map(|arg| arg.type_name.as_str())
             .collect::<Vec<&str>>(),
-        vec!["str", "dict"]
+        vec!["str", "str", "dict"]
     );
     assert_eq!(tool.returns.type_name.as_deref(), Some("dict"));
 }
