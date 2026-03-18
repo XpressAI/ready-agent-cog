@@ -5,6 +5,7 @@ use std::env;
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
+use tracing::{debug, trace, warn};
 
 use crate::error::{ReadyError, Result};
 use crate::llm::traits::LlmClient;
@@ -58,6 +59,13 @@ impl OpenAiClient {
     }
 
     async fn post_chat_completion(&self, payload: Value) -> Result<String> {
+        debug!(
+            model = %self.model,
+            api_base = %self.api_base,
+            payload = %payload,
+            "sending LLM chat completion request"
+        );
+
         let response = self
             .http
             .post(self.chat_completions_url())
@@ -67,7 +75,10 @@ impl OpenAiClient {
         let status = response.status();
         let body: Value = response.json().await?;
 
+        debug!(status = %status, body = %body, "received LLM chat completion response");
+
         if !status.is_success() {
+            warn!(status = %status, body = %body, "LLM chat completion request failed");
             return Err(ReadyError::Llm(format!(
                 "OpenAI-compatible API returned {status}: {}",
                 body
@@ -83,6 +94,13 @@ impl OpenAiClient {
         user_prompt: &str,
         json_schema: &Value,
     ) -> Result<Value> {
+        trace!(
+            system_prompt = system_prompt,
+            user_prompt = user_prompt,
+            json_schema = %json_schema,
+            "requesting structured LLM extraction"
+        );
+
         let raw = self
             .post_chat_completion(json!({
                 "model": &self.model,
@@ -100,6 +118,8 @@ impl OpenAiClient {
                 }
             }))
             .await?;
+
+        trace!(raw_response = raw, "received structured LLM extraction response");
 
         serde_json::from_str::<Value>(&raw).map_err(|error| {
             ReadyError::Llm(format!(
@@ -119,8 +139,16 @@ impl OpenAiClient {
             "{system_prompt}\n\nRespond with a JSON object only — no prose, no markdown fences. The JSON must conform to this schema:\n{schema_text}"
         );
 
+        debug!(
+            system_prompt = fallback_system_prompt,
+            user_prompt = user_prompt,
+            "falling back to plain-text structured extraction"
+        );
+
         let raw = self.complete(&fallback_system_prompt, user_prompt).await?;
         let stripped = strip_markdown_fences(&raw);
+
+        trace!(raw_response = raw, stripped_response = stripped, "received fallback structured extraction response");
 
         serde_json::from_str::<Value>(&stripped).map_err(|error| {
             ReadyError::Llm(format!(
@@ -142,6 +170,7 @@ impl Default for OpenAiClient {
 impl LlmClient for OpenAiClient {
     async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
         let _ = &self.api_key;
+        trace!(system_prompt = system_prompt, user_prompt = user_prompt, "requesting text completion from LLM");
         self.post_chat_completion(json!({
             "model": &self.model,
             "messages": [
@@ -163,7 +192,8 @@ impl LlmClient for OpenAiClient {
             .await
         {
             Ok(value) => Ok(value),
-            Err(_) => {
+            Err(error) => {
+                warn!(error = %error, "structured extraction failed; retrying with fallback mode");
                 self.complete_with_fallback(system_prompt, user_prompt, json_schema)
                     .await
             }

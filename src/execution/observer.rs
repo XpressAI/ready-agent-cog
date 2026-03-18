@@ -1,6 +1,6 @@
 //! Execution lifecycle observer trait and built-in implementations.
 
-use tracing::info;
+use tracing::{debug, error, info};
 
 use crate::error::ReadyError;
 use crate::execution::state::{ExecutionState, StepResult};
@@ -83,7 +83,7 @@ impl ExecutionObserver for LoggingObserver {
     }
 
     fn on_error(&self, step: &Step, error: &ReadyError, _state: &ExecutionState) {
-        info!(step = %step_type_name(step), error = %error, "execution error");
+        error!(step = %step_type_name(step), error = %error, "execution error");
     }
 
     fn on_plan_complete(&self, state: &ExecutionState) {
@@ -91,6 +91,16 @@ impl ExecutionObserver for LoggingObserver {
             status = ?state.status,
             variables = state.interpreter_state.variables.len(),
             "plan completed"
+        );
+        debug!(
+            ip_path = ?state.interpreter_state.ip_path,
+            variables = ?state.interpreter_state.variables,
+            pending_input_variable = ?state.interpreter_state.pending_input_variable,
+            pending_tool_id = ?state.interpreter_state.pending_tool_id,
+            pending_tool_state = ?state.interpreter_state.pending_tool_state,
+            pending_resume_value = ?state.interpreter_state.pending_resume_value,
+            suspension_reason = ?state.suspension_reason,
+            "final execution state snapshot"
         );
     }
 }

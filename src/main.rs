@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use serde_json::Value;
+use tracing::{debug, error};
+use tracing_subscriber::EnvFilter;
 
 use ready::execution::observer::LoggingObserver;
 use ready::llm::client::OpenAiClient;
@@ -29,6 +31,9 @@ const DEFAULT_SHELL_TOOLS_PATH: &str = "shell-tools.json";
     long_about = "Execute SOP-driven workflows by generating plans with an LLM and running them against pluggable tool registries, including builtins, shell tools, and reusable process tools."
 )]
 struct Cli {
+    #[arg(long, global = true, help = "Enable verbose debug output for plan loading and execution.")]
+    debug: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -110,14 +115,17 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    init_tracing(Cli::parse().debug);
+
     if let Err(error) = run().await {
-        eprintln!("error: {error}");
+        error!(error = %error, "command failed");
         std::process::exit(1);
     }
 }
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    let debug = cli.debug;
     match cli.command {
         Commands::Plan {
             sop,
@@ -132,6 +140,7 @@ async fn run() -> Result<()> {
                 plans_dir.as_deref(),
                 model,
                 output.as_deref(),
+                debug,
             )
             .await
         }
@@ -150,14 +159,30 @@ async fn run() -> Result<()> {
                 plans_dir.as_deref(),
                 model,
                 &inputs,
+                debug,
             )
             .await
         }
-        Commands::Inspect { plan } => handle_inspect(&plan),
+        Commands::Inspect { plan } => handle_inspect(&plan, debug),
         Commands::Tools { tools, plans_dir } => {
-            handle_tools(tools.as_deref(), plans_dir.as_deref())
+            handle_tools(tools.as_deref(), plans_dir.as_deref(), debug)
         }
     }
+}
+
+fn init_tracing(debug_enabled: bool) {
+    let filter = if debug_enabled {
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("ready=trace,ready_agent_cog=trace"))
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+    };
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 async fn handle_plan(
@@ -166,11 +191,14 @@ async fn handle_plan(
     plans_dir: Option<&str>,
     model: Option<String>,
     output_path: Option<&str>,
+    debug: bool,
 ) -> Result<()> {
     let sop_path = PathBuf::from(sop_path);
+    debug_log(debug, format!("Planning SOP from {}", sop_path.display()));
     let llm = Arc::new(OpenAiClient::new(model, None, None));
     let registry = Arc::new(build_registry(llm.clone(), tools_path, plans_dir)?);
     let plan = generate_plan(llm, registry.as_ref(), &sop_path).await?;
+    debug_log(debug, format!("Generated plan:\n{}", format_plan(&plan)));
 
     let output_path = output_path
         .map(PathBuf::from)
@@ -187,14 +215,19 @@ async fn handle_run(
     plans_dir: Option<&str>,
     model: Option<String>,
     inputs: &[String],
+    debug: bool,
 ) -> Result<()> {
     let llm = Arc::new(OpenAiClient::new(model, None, None));
     let registry = Arc::new(build_registry(llm.clone(), tools_path, plans_dir)?);
 
     let plan = match (plan_path, sop_path) {
-        (Some(plan_path), _) => load_plan(Path::new(plan_path))?,
+        (Some(plan_path), _) => {
+            debug_log(debug, format!("Loading plan from {plan_path}"));
+            load_plan(Path::new(plan_path))?
+        }
         (None, Some(sop_path)) => {
             let sop_path = PathBuf::from(sop_path);
+            debug_log(debug, format!("Generating plan from SOP {}", sop_path.display()));
             generate_plan(llm, registry.as_ref(), &sop_path).await?
         }
         (None, None) => {
@@ -208,10 +241,25 @@ async fn handle_run(
     let initial_inputs = parse_prefilled_inputs(inputs)?;
     validate_prefilled_inputs(&plan, &initial_inputs)?;
 
+    if debug {
+        debug!(plan = %format_plan(&plan), "execution plan loaded");
+        debug!(
+            initial_inputs = %serde_json::to_string_pretty(&initial_inputs)?,
+            "initial inputs parsed"
+        );
+    }
+
     let executor = SopExecutor::new(registry, Some(Arc::new(LoggingObserver)));
     let state = executor
         .execute(&plan, initial_inputs, Some(Box::new(prompt_for_input)))
         .await?;
+
+    if debug {
+        debug!(
+            interpreter_state = %serde_json::to_string_pretty(&state.interpreter_state)?,
+            "final interpreter state"
+        );
+    }
 
     println!("Execution finished with status: {:?}", state.status);
     if let Some(error) = state.error {
@@ -225,16 +273,18 @@ async fn handle_run(
     Ok(())
 }
 
-fn handle_inspect(plan_path: &str) -> Result<()> {
+fn handle_inspect(plan_path: &str, debug: bool) -> Result<()> {
+    debug_log(debug, format!("Inspecting plan from {plan_path}"));
     let plan = load_plan(Path::new(plan_path))?;
     print!("{}", format_plan(&plan));
     print_prefillable_inputs(&plan);
     Ok(())
 }
 
-fn handle_tools(tools_path: Option<&str>, plans_dir: Option<&str>) -> Result<()> {
+fn handle_tools(tools_path: Option<&str>, plans_dir: Option<&str>, debug: bool) -> Result<()> {
     let llm = Arc::new(OpenAiClient::default());
     let registry = build_registry(llm, tools_path, plans_dir)?;
+    debug_log(debug, format!("Loaded {} tools", registry.tools().len()));
     for tool in registry.tools() {
         println!("{} - {}", tool.id, tool.description);
     }
@@ -264,6 +314,12 @@ fn build_registry(
     }
 
     Ok(registry)
+}
+
+fn debug_log(enabled: bool, message: impl AsRef<str>) {
+    if enabled {
+        debug!(message = %message.as_ref());
+    }
 }
 
 async fn generate_plan(

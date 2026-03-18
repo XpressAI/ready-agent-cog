@@ -1,6 +1,7 @@
 //! LLM-powered plan generation from Standard Operating Procedure (SOP) text.
 
 use std::sync::Arc;
+use tracing::{debug, trace, warn};
 
 use crate::error::{ReadyError, Result};
 use crate::llm::client::strip_markdown_fences;
@@ -100,21 +101,35 @@ impl SopPlanner {
         let mut user_prompt = artifacts.initial_user_prompt.clone();
         let mut last_error: Option<ReadyError> = None;
 
+        debug!(
+            plan_name = %artifacts.plan_name,
+            retries = self.max_retries,
+            tool_count = tool_descriptions.len(),
+            "starting SOP planning"
+        );
+
         for attempt in 0..=self.max_retries {
+            debug!(attempt = attempt + 1, max_attempts = self.max_retries + 1, "requesting plan generation from LLM");
+            trace!(system_prompt = artifacts.system_prompt.as_str(), user_prompt = user_prompt.as_str(), "planner prompts prepared");
+
             let raw = self
                 .llm
                 .complete(&artifacts.system_prompt, &user_prompt)
                 .await?;
             let code = strip_markdown_fences(&raw);
 
+            trace!(raw_response = raw.as_str(), stripped_code = code.as_str(), "planner received candidate plan code");
+
             let plan = match parse_and_validate_plan(&code, &artifacts.plan_name, tool_descriptions)
             {
                 Ok(plan) => plan,
                 Err(error) => {
+                    warn!(attempt = attempt + 1, error = %error, "planner rejected candidate plan; preparing retry if available");
                     last_error = Some(error);
                     if attempt < self.max_retries {
                         user_prompt =
                             build_retry_prompt(sop_text, last_error.as_ref().expect("error set"));
+                        trace!(retry_prompt = user_prompt.as_str(), "planner retry prompt prepared");
                         continue;
                     }
                     return Err(last_error.expect("error set"));
@@ -123,12 +138,14 @@ impl SopPlanner {
 
             let mut plan = plan;
             let description_prompt = build_description_prompt(sop_text, &plan.prefillable_inputs());
+            trace!(description_prompt = description_prompt.as_str(), "requesting plan description from LLM");
             plan.description = self
                 .llm
                 .complete(DESCRIPTION_SYSTEM, &description_prompt)
                 .await?
                 .trim()
                 .to_string();
+            debug!(plan_name = %plan.name, step_count = plan.steps.len(), "planning completed successfully");
             return Ok(plan);
         }
 
@@ -154,12 +171,14 @@ pub(crate) fn parse_and_validate_plan(
     plan_name: &str,
     tool_descriptions: &[ToolDescription],
 ) -> Result<AbstractPlan> {
+    trace!(plan_name = plan_name, code = code, "parsing generated plan code");
     let plan = parse_python_to_plan(code, plan_name)?;
     let hard_errors = validation_errors(&plan, tool_descriptions);
 
     if hard_errors.is_empty() {
         Ok(plan)
     } else {
+        warn!(plan_name = plan_name, errors = ?hard_errors, "plan validation produced hard errors");
         Err(ReadyError::PlanValidation(format!(
             "Plan validation failed: {}",
             hard_errors.join("; ")
