@@ -852,7 +852,7 @@ fn unary_negation_emits_assign_with_unary_expression() {
 fn arithmetic_no_output_variable_raises_value_error() {
     let error = parse_python_to_plan(&wrap_in_main("a % 2"), "main").expect_err("should fail");
     assert!(
-        matches!(error, ReadyError::PlanParsing(message) if message.contains("Unsupported expression statement type: BinOp"))
+        matches!(error, ReadyError::PlanParsing(message) if message.contains("bare 'binary operator' is not allowed as a statement"))
     );
 }
 
