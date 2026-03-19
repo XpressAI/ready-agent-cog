@@ -175,12 +175,18 @@ async fn plan_retries_after_validation_error() {
 }
 
 #[test]
-fn build_retry_prompt_appends_error_context() {
-    let prompt = build_retry_prompt("Read report", &ReadyError::Llm("bad output".to_string()));
+fn build_retry_prompt_appends_error_context_and_broken_code() {
+    let prompt = build_retry_prompt(
+        "Read report",
+        "def main():\n    post_to_slack(undefined_var)",
+        &ReadyError::Llm("bad output".to_string()),
+    );
 
     assert!(prompt.contains("Read report"));
     assert!(prompt.contains("bad output"));
     assert!(prompt.contains("Previous attempt failed"));
+    assert!(prompt.contains("Broken code from the previous attempt"));
+    assert!(prompt.contains("post_to_slack(undefined_var)"));
 }
 
 #[test]

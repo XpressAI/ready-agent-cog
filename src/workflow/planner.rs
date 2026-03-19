@@ -68,8 +68,12 @@ const DESCRIPTION_SYSTEM: &str = concat!(
     "- Do NOT include any code or markdown formatting — plain prose only."
 );
 
-const ERROR_SUFFIX_TEMPLATE: &str =
-    "[Previous attempt failed — error: {error}]\nPlease fix the code and try again.";
+const ERROR_SUFFIX_TEMPLATE: &str = concat!(
+    "[Previous attempt failed — error: {error}]\n",
+    "Broken code from the previous attempt:\n",
+    "{code}\n\n",
+    "Please fix the code and try again."
+);
 
 /// Orchestrates LLM-based plan generation from SOP text into a validated [`AbstractPlan`](src/plan.rs:1).
 /// It generates Python plan code via the LLM, parses it, validates the result, and retries on failure.
@@ -127,8 +131,11 @@ impl SopPlanner {
                     warn!(attempt = attempt + 1, error = %error, "planner rejected candidate plan; preparing retry if available");
                     last_error = Some(error);
                     if attempt < self.max_retries {
-                        user_prompt =
-                            build_retry_prompt(sop_text, last_error.as_ref().expect("error set"));
+                        user_prompt = build_retry_prompt(
+                            sop_text,
+                            &code,
+                            last_error.as_ref().expect("error set"),
+                        );
                         trace!(retry_prompt = user_prompt.as_str(), "planner retry prompt prepared");
                         continue;
                     }
@@ -220,8 +227,10 @@ fn collect_user_input_description() -> ToolDescription {
     }
 }
 
-pub(crate) fn build_retry_prompt(sop_text: &str, error: &ReadyError) -> String {
-    let suffix = ERROR_SUFFIX_TEMPLATE.replace("{error}", &error.to_string());
+pub(crate) fn build_retry_prompt(sop_text: &str, code: &str, error: &ReadyError) -> String {
+    let suffix = ERROR_SUFFIX_TEMPLATE
+        .replace("{error}", &error.to_string())
+        .replace("{code}", code);
     format!("{sop_text}\n\n{suffix}")
 }
 
