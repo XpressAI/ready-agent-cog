@@ -219,8 +219,8 @@ fn parse_command_output_rejects_failed_non_raw_command() {
 }
 
 #[test]
-fn parse_command_output_allows_failed_raw_command_and_combines_streams() {
-    let parsed = ShellToolsModule::parse_command_output(
+fn parse_command_output_rejects_failed_raw_command() {
+    let error = ShellToolsModule::parse_command_output(
         &entry(&["tool"]),
         ShellCommandOutput {
             success: false,
@@ -230,9 +230,11 @@ fn parse_command_output_allows_failed_raw_command_and_combines_streams() {
         },
         "raw_tool",
     )
-    .expect("raw output should still succeed");
+    .expect_err("raw output should fail on non-zero exit code");
 
-    assert_eq!(parsed, json!("hello world"));
+    assert!(error.to_string().contains("Command failed"));
+    assert!(error.to_string().contains("1"));
+    assert!(error.to_string().contains(" world"));
 }
 
 #[test]

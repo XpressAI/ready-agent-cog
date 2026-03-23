@@ -152,7 +152,7 @@ impl ShellToolsModule {
         output: ShellCommandOutput,
         tool_id: &str,
     ) -> Result<Value> {
-        if !matches!(entry.output_parsing, OutputParsing::Raw) && !output.success {
+        if !output.success {
             return Err(ReadyError::Tool {
                 tool_id: tool_id.to_string(),
                 message: format!(
