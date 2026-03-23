@@ -2,9 +2,9 @@ use super::runtime::InMemoryToolRegistry;
 use crate::error::{ReadyError, Result};
 use crate::tools::models::{ToolCall, ToolDescription, ToolResult};
 use crate::tools::traits::ToolsModule;
+use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 struct StubToolsModule {
@@ -13,15 +13,13 @@ struct StubToolsModule {
     calls: Arc<Mutex<Vec<(String, Vec<Value>)>>>,
 }
 
+#[async_trait]
 impl ToolsModule for StubToolsModule {
     fn tools(&self) -> &[ToolDescription] {
         &self.tools
     }
 
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
+    async fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
         self.calls
             .lock()
             .expect("calls mutex poisoned")
@@ -30,7 +28,7 @@ impl ToolsModule for StubToolsModule {
             Some(value) => Ok(ToolResult::Success(value.clone())),
             None => Err(ReadyError::ToolNotFound(call.tool_id.clone())),
         };
-        Box::pin(async move { result })
+        result
     }
 }
 

@@ -15,8 +15,8 @@ use crate::tools::registry::InMemoryToolRegistry;
 use crate::tools::traits::ToolsModule;
 use serde_json::Value;
 use serde_json::json;
-use std::pin::Pin;
 use std::sync::Arc;
+use async_trait::async_trait;
 
 fn plan(steps: Vec<Step>) -> AbstractPlan {
     AbstractPlan {
@@ -110,7 +110,7 @@ fn tool_description(tool_id: &str, arguments: &[&str]) -> ToolDescription {
             name: None,
             description: String::new(),
             type_name: None,
-            fields: Vec::new(),
+            fields: vec![],
         },
     }
 }
@@ -1079,15 +1079,13 @@ impl SuspendingModule {
     }
 }
 
+#[async_trait]
 impl ToolsModule for SuspendingModule {
     fn tools(&self) -> &[ToolDescription] {
         &self.tools
     }
 
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
+    async fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
         let continuation_state = call.continuation.as_ref().map(|c| c.state.clone());
         let resume_value = call
             .continuation
@@ -1098,17 +1096,15 @@ impl ToolsModule for SuspendingModule {
             .expect("execute calls mutex poisoned")
             .push((continuation_state.clone(), resume_value.clone()));
 
-        Box::pin(async move {
-            if continuation_state.is_some() {
-                return Ok(ToolResult::Success(resume_value.unwrap_or(Value::Null)));
-            }
-            Ok(ToolResult::Suspended(
-                crate::tools::models::ToolSuspension {
-                    reason: "need input".to_string(),
-                    continuation_state: json!({"step":"waiting"}),
-                },
-            ))
-        })
+        if continuation_state.is_some() {
+            return Ok(ToolResult::Success(resume_value.unwrap_or(Value::Null)));
+        }
+        Ok(ToolResult::Suspended(
+            crate::tools::models::ToolSuspension {
+                reason: "need input".to_string(),
+                continuation_state: json!({"step":"waiting"}),
+            },
+        ))
     }
 }
 
@@ -1128,15 +1124,13 @@ impl MultiSuspendModule {
     }
 }
 
+#[async_trait]
 impl ToolsModule for MultiSuspendModule {
     fn tools(&self) -> &[ToolDescription] {
         &self.tools
     }
 
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
+    async fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
         let continuation_state = call.continuation.as_ref().map(|c| c.state.clone());
         let resume_value = call
             .continuation
@@ -1155,25 +1149,21 @@ impl ToolsModule for MultiSuspendModule {
                 .push(value);
         }
 
-        let suspend_count = self.suspend_count;
-        let resume_values = self.resume_values.clone();
-        Box::pin(async move {
-            if call_number < suspend_count {
-                let next = call_number + 1;
-                return Ok(ToolResult::Suspended(
-                    crate::tools::models::ToolSuspension {
-                        reason: format!("round {next}"),
-                        continuation_state: json!({"call": next}),
-                    },
-                ));
-            }
-            Ok(ToolResult::Success(Value::Array(
-                resume_values
-                    .lock()
-                    .expect("resume values mutex poisoned")
-                    .clone(),
-            )))
-        })
+        if call_number < self.suspend_count {
+            let next = call_number + 1;
+            return Ok(ToolResult::Suspended(
+                crate::tools::models::ToolSuspension {
+                    reason: format!("round {next}"),
+                    continuation_state: json!({"call": next}),
+                },
+            ));
+        }
+        Ok(ToolResult::Success(Value::Array(
+            self.resume_values
+                .lock()
+                .expect("resume values mutex poisoned")
+                .clone(),
+        )))
     }
 }
 

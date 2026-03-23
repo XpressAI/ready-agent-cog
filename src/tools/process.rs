@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -244,46 +243,42 @@ fn validate_process_plans(
 }
 
 /// Executes a saved plan as a tool, including suspend-and-resume behavior.
+#[async_trait]
 impl ToolsModule for ProcessToolsModule {
     fn tools(&self) -> &[ToolDescription] {
         &self.descriptions
     }
 
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-        Box::pin(async move {
-            let tool_id = call.tool_id.as_str();
-            let plan = self
-                .plans
-                .get(tool_id)
-                .ok_or_else(|| ReadyError::ToolNotFound(tool_id.to_string()))?;
+    async fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
+        let tool_id = call.tool_id.as_str();
+        let plan = self
+            .plans
+            .get(tool_id)
+            .ok_or_else(|| ReadyError::ToolNotFound(tool_id.to_string()))?;
 
-            let mut state = if call.continuation.is_some() {
-                restore_execution_state(call)?
-            } else {
-                seed_execution_state(&self.descriptions, tool_id, &call.args)?
-            };
+        let mut state = if call.continuation.is_some() {
+            restore_execution_state(call)?
+        } else {
+            seed_execution_state(&self.descriptions, tool_id, &call.args)?
+        };
 
-            if let Some(cont) = &call.continuation {
-                if let Some(resume_value) = cont.resume_value.clone() {
-                    self.runner
-                        .provide_input(self.registry.clone(), plan, &mut state, resume_value)
-                        .await?;
-                } else {
-                    self.runner
-                        .execute(self.registry.clone(), plan, &mut state)
-                        .await?;
-                }
+        if let Some(cont) = &call.continuation {
+            if let Some(resume_value) = cont.resume_value.clone() {
+                self.runner
+                    .provide_input(self.registry.clone(), plan, &mut state, resume_value)
+                    .await?;
             } else {
                 self.runner
                     .execute(self.registry.clone(), plan, &mut state)
                     .await?;
             }
+        } else {
+            self.runner
+                .execute(self.registry.clone(), plan, &mut state)
+                .await?;
+        }
 
-            map_execution_state_to_tool_result(tool_id, &state)
-        })
+        map_execution_state_to_tool_result(tool_id, &state)
     }
 }
 

@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::pin::Pin;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::process::Command;
@@ -186,29 +187,25 @@ pub(crate) fn build_descriptions(
 }
 
 /// Executes a rendered shell command and parses its output into a tool result.
+#[async_trait]
 impl ToolsModule for ShellToolsModule {
     fn tools(&self) -> &[ToolDescription] {
         &self.descriptions
     }
 
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-        Box::pin(async move {
-            let tool_id = call.tool_id.as_str();
-            let args = &call.args;
-            let entry = self
-                .entries
-                .get(tool_id)
-                .ok_or_else(|| ReadyError::ToolNotFound(tool_id.to_string()))?;
+    async fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
+        let tool_id = call.tool_id.as_str();
+        let args = &call.args;
+        let entry = self
+            .entries
+            .get(tool_id)
+            .ok_or_else(|| ReadyError::ToolNotFound(tool_id.to_string()))?;
 
-            let rendered = Self::render_command(entry, args, tool_id)?;
-            let output = self.runner.run(rendered).await?;
-            let parsed = Self::parse_command_output(entry, output, tool_id)?;
+        let rendered = Self::render_command(entry, args, tool_id)?;
+        let output = self.runner.run(rendered).await?;
+        let parsed = Self::parse_command_output(entry, output, tool_id)?;
 
-            Ok(ToolResult::Success(parsed))
-        })
+        Ok(ToolResult::Success(parsed))
     }
 }
 

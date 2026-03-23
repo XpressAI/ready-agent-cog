@@ -1,8 +1,8 @@
 //! Built-in tools, including LLM delegation, plaintext extraction, and list sorting.
 
-use std::pin::Pin;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::{ReadyError, Result};
@@ -148,91 +148,87 @@ impl BuiltinToolsModule {
 }
 
 /// Dispatches execution for the built-in tools.
+#[async_trait]
 impl ToolsModule for BuiltinToolsModule {
     fn tools(&self) -> &[ToolDescription] {
         &self.descriptions
     }
 
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-        Box::pin(async move {
-            let tool_id = call.tool_id.as_str();
-            let args = &call.args;
-            match tool_id {
-                "delegate_to_large_language_model" => {
-                    if args.len() < 2 {
-                        return Err(ReadyError::Tool {
-                            tool_id: tool_id.to_string(),
-                            message: "Expected arguments: system_prompt, user_prompt".to_string(),
-                        });
-                    }
-                    let system_prompt = Self::value_as_str(&args[0], tool_id, "system_prompt")?;
-                    let user_prompt = Self::value_as_str(&args[1], tool_id, "user_prompt")?;
-                    let output = self.llm.complete(&system_prompt, &user_prompt).await?;
-                    Ok(ToolResult::Success(Value::String(output)))
-                }
-                "extract_from_plaintext" => {
-                    if args.len() < 3 {
-                        return Err(ReadyError::Tool {
-                            tool_id: tool_id.to_string(),
-                            message: "Expected arguments: system_prompt, plaintext, json_schema"
-                                .to_string(),
-                        });
-                    }
-                    let system_prompt = Self::value_as_str(&args[0], tool_id, "system_prompt")?;
-                    let user_prompt = Self::value_as_str(&args[1], tool_id, "plaintext")?;
-                    let schema = &args[2];
-                    let output = self
-                        .llm
-                        .extract(
-                            if system_prompt.is_empty() {
-                                &self.extraction_system_prompt
-                            } else {
-                                &system_prompt
-                            },
-                            &user_prompt,
-                            schema,
-                        )
-                        .await?;
-                    Ok(ToolResult::Success(output))
-                }
-                "sort_list" => {
-                    if args.len() < 3 {
-                        return Err(ReadyError::Tool {
-                            tool_id: tool_id.to_string(),
-                            message: "Expected arguments: items, key, reverse".to_string(),
-                        });
-                    }
-
-                    let items = args[0]
-                        .as_array()
-                        .cloned()
-                        .ok_or_else(|| ReadyError::Tool {
-                            tool_id: tool_id.to_string(),
-                            message: "Argument 'items' must be a list".to_string(),
-                        })?;
-                    let key = Self::value_as_str(&args[1], tool_id, "key")?;
-                    let reverse = args[2].as_bool().ok_or_else(|| ReadyError::Tool {
+    async fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
+        let tool_id = call.tool_id.as_str();
+        let args = &call.args;
+        match tool_id {
+            "delegate_to_large_language_model" => {
+                if args.len() < 2 {
+                    return Err(ReadyError::Tool {
                         tool_id: tool_id.to_string(),
-                        message: "Argument 'reverse' must be a bool".to_string(),
-                    })?;
-
-                    let mut items = items;
-                    items.sort_by(|left, right| {
-                        let left_value = sortable_value(left, &key);
-                        let right_value = sortable_value(right, &key);
-                        compare_json_values(left_value, right_value)
+                        message: "Expected arguments: system_prompt, user_prompt".to_string(),
                     });
-                    if reverse {
-                        items.reverse();
-                    }
-                    Ok(ToolResult::Success(Value::Array(items)))
                 }
-                _ => Err(ReadyError::ToolNotFound(tool_id.to_string())),
+                let system_prompt = Self::value_as_str(&args[0], tool_id, "system_prompt")?;
+                let user_prompt = Self::value_as_str(&args[1], tool_id, "user_prompt")?;
+                let output = self.llm.complete(&system_prompt, &user_prompt).await?;
+                Ok(ToolResult::Success(Value::String(output)))
             }
-        })
+            "extract_from_plaintext" => {
+                if args.len() < 3 {
+                    return Err(ReadyError::Tool {
+                        tool_id: tool_id.to_string(),
+                        message: "Expected arguments: system_prompt, plaintext, json_schema"
+                            .to_string(),
+                    });
+                }
+                let system_prompt = Self::value_as_str(&args[0], tool_id, "system_prompt")?;
+                let user_prompt = Self::value_as_str(&args[1], tool_id, "plaintext")?;
+                let schema = &args[2];
+                let output = self
+                    .llm
+                    .extract(
+                        if system_prompt.is_empty() {
+                            &self.extraction_system_prompt
+                        } else {
+                            &system_prompt
+                        },
+                        &user_prompt,
+                        schema,
+                    )
+                    .await?;
+                Ok(ToolResult::Success(output))
+            }
+            "sort_list" => {
+                if args.len() < 3 {
+                    return Err(ReadyError::Tool {
+                        tool_id: tool_id.to_string(),
+                        message: "Expected arguments: items, key, reverse".to_string(),
+                    });
+                }
+
+                let items = args[0]
+                    .as_array()
+                    .cloned()
+                    .ok_or_else(|| ReadyError::Tool {
+                        tool_id: tool_id.to_string(),
+                        message: "Argument 'items' must be a list".to_string(),
+                    })?;
+                let key = Self::value_as_str(&args[1], tool_id, "key")?;
+                let reverse = args[2].as_bool().ok_or_else(|| ReadyError::Tool {
+                    tool_id: tool_id.to_string(),
+                    message: "Argument 'reverse' must be a bool".to_string(),
+                })?;
+
+                let mut items = items;
+                items.sort_by(|left, right| {
+                    let left_value = sortable_value(left, &key);
+                    let right_value = sortable_value(right, &key);
+                    compare_json_values(left_value, right_value)
+                });
+                if reverse {
+                    items.reverse();
+                }
+                Ok(ToolResult::Success(Value::Array(items)))
+            }
+            _ => Err(ReadyError::ToolNotFound(tool_id.to_string())),
+        }
     }
 }
 

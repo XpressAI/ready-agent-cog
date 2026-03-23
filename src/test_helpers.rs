@@ -1,8 +1,8 @@
 //! Shared test utilities for plan construction and expression building.
 
-use std::pin::Pin;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::Result;
@@ -94,16 +94,13 @@ impl HandlerToolsModule {
     }
 }
 
+#[async_trait]
 impl ToolsModule for HandlerToolsModule {
     fn tools(&self) -> &[ToolDescription] {
         &self.tools
     }
 
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-        let result = (self.handler)(call.tool_id.as_str(), call.args.clone());
-        Box::pin(async move { result })
+    async fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
+        (self.handler)(call.tool_id.as_str(), call.args.clone())
     }
 }

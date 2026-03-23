@@ -70,7 +70,7 @@ ready run --sop standup_process.txt --tools shell-tools.json --plans-dir ./plans
 
 `read_file`, `read_google_doc`, and `post_to_slack` in this example are user-defined shell tools loaded from [`shell-tools.json`](src/tools/shell.rs). The only built-in tools are `delegate_to_large_language_model`, `extract_from_plaintext`, and `sort_list`.
 
-When the planner emits [`collect_user_input`](src/workflow/planner.rs:158), it writes a planning-time pseudo-function into the generated Python. During execution, that pseudo-call becomes a [`Step::UserInteractionStep`](src/planning/parser/statements.rs:78) handled by the [`PlanInterpreter`](src/execution/interpreter.rs:315). You can inspect those prefillable inputs up front with [`ready inspect`](src/main.rs), then satisfy them ahead of time with [`--input NAME=VALUE`](src/main.rs:85). Any remaining interaction still **suspends** and resumes exactly where it left off.
+When the planner emits [`collect_user_input`](src/workflow/planner.rs:53), it writes a planning-time pseudo-function into the generated Python. During execution, that pseudo-call becomes a [`Step::UserInteractionStep`](src/planning/parser/statements.rs:78) handled by the [`PlanInterpreter`](src/execution/interpreter.rs:20). You can inspect those prefillable inputs up front with [`ready inspect`](src/main.rs), then satisfy them ahead of time with [`--input NAME=VALUE`](src/main.rs:90). Any remaining interaction still **suspends** and resumes exactly where it left off.
 
 ## Installation
 
@@ -285,7 +285,7 @@ Minimal [`shell-tools.json`](src/tools/shell.rs) example:
 
 ### Shell tools with JSON output
 
-When a tool's stdout is a JSON object or array, set [`output_parsing`](src/tools/shell.rs:38) to `"json"`. Ready passes the raw stdout through [`serde_json::from_str`](src/tools/shell.rs:223) and returns the parsed [`Value`](src/tools/shell.rs:9) directly to the plan interpreter. The command must exit with code 0; a non-zero exit code produces a [`ReadyError::Tool`](src/error.rs) before any parsing is attempted.
+When a tool's stdout is a JSON object or array, set [`output_parsing`](src/tools/shell.rs:39) to `"json"`. Ready passes the raw stdout through `serde_json::from_str` and returns the parsed `Value` directly to the plan interpreter. The command must exit with code 0; a non-zero exit code produces a [`ReadyError::Tool`](src/error.rs) before any parsing is attempted.
 
 Declare the shape of the JSON object in [`returns.fields`](src/tools/models.rs:23). Each entry in `fields` becomes a typed attribute in the generated Python class stub that the planner sees, so the LLM knows which keys to access in the plan.
 
@@ -381,7 +381,7 @@ def get_latest_transcripts() -> LatestTranscriptsResult:
     ...
 ```
 
-[`output_schema`](src/tools/shell.rs:39) accepts a JSON Schema object or `null`. The field is stored on [`ShellToolEntry`](src/tools/shell.rs:31) but is not validated at runtime; it is reserved for future use.
+[`output_schema`](src/tools/shell.rs:40) accepts a JSON Schema object or `null`. The field is stored on [`ShellToolEntry`](src/tools/shell.rs:32) but is not validated at runtime; it is reserved for future use.
 
 **Observer pattern.** Hook into execution via [`ExecutionObserver`](src/execution/observer.rs) to log, trace, or react to step start, completion, suspension, and errors.
 
@@ -405,7 +405,7 @@ ready inspect --plan <file>
 ready tools   [--tools <file>] [--plans-dir <dir>]
 ```
 
-Use [`ready inspect`](src/main.rs) to see which `NAME` values are actually prefillable for a given plan before calling [`ready run`](src/main.rs) with [`--input NAME=VALUE`](src/main.rs:85). Values are parsed as JSON when possible, otherwise treated as plain strings.
+Use [`ready inspect`](src/main.rs) to see which `NAME` values are actually prefillable for a given plan before calling [`ready run`](src/main.rs) with [`--input NAME=VALUE`](src/main.rs:90). Values are parsed as JSON when possible, otherwise treated as plain strings.
 
 `--tools` points to a [`shell-tools.json`](src/tools/shell.rs) file. If omitted, Ready looks for `shell-tools.json` in the current directory.
 

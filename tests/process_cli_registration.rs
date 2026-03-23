@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::pin::Pin;
 
+use async_trait::async_trait;
 use ready::error::Result;
 use ready::plan::{AbstractPlan, Step};
 use ready::tools::models::{ToolCall, ToolDescription, ToolResult, ToolReturnDescription};
@@ -11,16 +11,14 @@ struct MockModule {
     descriptions: Vec<ToolDescription>,
 }
 
+#[async_trait]
 impl ToolsModule for MockModule {
     fn tools(&self) -> &[ToolDescription] {
         &self.descriptions
     }
 
-    fn execute<'a>(
-        &'a self,
-        _call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-        Box::pin(async { Ok(ToolResult::Success(Value::Null)) })
+    async fn execute(&self, _call: &ToolCall) -> Result<ToolResult> {
+        Ok(ToolResult::Success(Value::Null))
     }
 }
 

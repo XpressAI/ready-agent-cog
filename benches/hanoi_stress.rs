@@ -5,10 +5,10 @@
 //! measuring parsing and interpreter execution separately.
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ready::Result;
 use ready::execution::interpreter::PlanInterpreter;
@@ -199,17 +199,14 @@ struct MockToolsModule {
     handler: Arc<dyn Fn(&str, Vec<Value>) -> Result<ToolResult> + Send + Sync>,
 }
 
+#[async_trait]
 impl ToolsModule for MockToolsModule {
     fn tools(&self) -> &[ToolDescription] {
         &self.tools
     }
 
-    fn execute<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
-        let result = (self.handler)(call.tool_id.as_str(), call.args.clone());
-        Box::pin(async move { result })
+    async fn execute(&self, call: &ToolCall) -> Result<ToolResult> {
+        (self.handler)(call.tool_id.as_str(), call.args.clone())
     }
 }
 
