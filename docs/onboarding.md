@@ -387,6 +387,62 @@ Execution lifecycle hooks are pluggable.
 
 ---
 
+## Error Recovery
+
+Ready's "LLM only at planning time" principle is elegant, but it creates a tension: what happens when the world doesn't cooperate with the plan? A tool call might fail because an API token has expired, a file has moved, or a remote service returns an unexpected response. The plan was valid when it was generated — the interpreter just ran into something it couldn't handle.
+
+This is where error recovery comes in. Rather than abandoning the run entirely, Ready can ask the LLM to reason about what went wrong and generate a continuation plan that picks up where execution left off.
+
+### The Two Kinds of Failure
+
+Not all errors are created equal. Ready distinguishes between two fundamentally different failure modes, and the distinction matters enormously for recovery.
+
+**Structural errors** — [`PlanParsing`](src/error.rs:17), [`PlanValidation`](src/error.rs:20), and [`ToolNotFound`](src/error.rs:29) — mean the plan itself is broken. The LLM generated code that couldn't be parsed, referenced a variable that doesn't exist, or called a tool that isn't registered. Retrying execution won't help; the plan needs to be regenerated from scratch. These errors are not recoverable.
+
+**Runtime errors** — [`Execution`](src/error.rs:41) and [`Tool`](src/error.rs:25) — mean the plan was structurally sound but something went wrong while it was running. A tool returned an error, or the interpreter hit an unexpected condition. The plan's logic was fine; the environment wasn't. These errors *are* recoverable, because the LLM can look at what happened and reason about a different approach.
+
+This classification lives in [`ReadyError::is_recoverable()`](src/error.rs:67). The logic is intentionally simple: if the error came from running the plan, recovery is worth attempting; if the error came from building the plan, it isn't.
+
+### What Recovery Actually Does
+
+When [`SopExecutor::execute_with_recovery()`](src/workflow/executor.rs:175) detects a failed execution with a recoverable error, it assembles a [`RecoveryContext`](src/execution/state.rs:266) — a bundle containing the original plan, the execution state at the point of failure, and the error details. This context is handed to [`SopPlanner::recover()`](src/workflow/planner.rs:186), which sends it to the LLM along with the original SOP text.
+
+The LLM's job at this point is different from its job during initial planning. It isn't translating an SOP from scratch. It's reading a post-mortem: here is what the plan was trying to do, here is where it got to, here is what went wrong. From that, it generates a *continuation plan* — a new, complete, valid plan that handles the error and carries on with whatever work remains.
+
+That continuation plan is then executed via [`SopExecutor::execute_from_checkpoint()`](src/workflow/executor.rs:227), which initialises execution from the failed state's variables and instruction pointer. Steps that already completed successfully don't run again.
+
+### Keeping the LLM Prompt Manageable
+
+One practical concern with passing execution state to an LLM is size. A long-running plan might accumulate dozens of variables, some of them large strings — full document contents, API responses, and so on. Dumping all of that into a prompt would be wasteful and potentially counterproductive.
+
+[`ExecutionState::to_llm_context()`](src/execution/state.rs:226) addresses this by truncating: it takes only the first `max_vars` variables and caps error messages at `max_len` characters. The LLM gets enough context to understand what happened and where, without being overwhelmed by data it doesn't need.
+
+### What the LLM Can Do With This
+
+The recovery prompt gives the LLM genuine latitude to reason about the failure. Consider a few scenarios:
+
+A plan fetches a document from a URL and the tool returns a 403. The LLM might generate a continuation that calls `collect_user_input` to ask the user for credentials, then retries the fetch. The original plan had no reason to anticipate an auth failure; the recovery plan can handle it gracefully.
+
+A plan posts a message to a Slack channel and the tool reports the channel doesn't exist. The LLM might generate a continuation that asks the user to confirm the channel name, then retries. Or it might decide the step can be skipped and continue with the rest of the workflow.
+
+A plan calls a shell tool that exits with a non-zero status. The LLM can read the error message, decide whether it's fatal, and either find a workaround or surface the problem to the user via `collect_user_input`.
+
+In all of these cases, the LLM is doing what it's good at — reading context and reasoning about it — while the deterministic interpreter handles everything else.
+
+### The Limits of Recovery
+
+Recovery is not a magic safety net. It has a `max_recovery_attempts` ceiling, and if the LLM can't generate a valid continuation plan within the retry budget, the run fails. The recovery plan itself goes through the same parse-and-validate pipeline as any other plan, so a hallucinated tool call or a syntax error will be caught and retried, but eventually the budget runs out.
+
+More fundamentally, recovery only works for errors the LLM can reason about. If a tool is consistently broken — returning garbage output regardless of how it's called — the LLM will keep generating plans that fail in the same way. Recovery is most useful for *situational* failures: auth problems, missing resources, unexpected but interpretable error messages.
+
+### How This Fits the Architecture
+
+Error recovery is a deliberate extension of the "LLM only at planning time" principle, not a violation of it. The LLM is still only invoked to generate plans — it never touches runtime data directly, never decides which tool to call next, never sees the full execution context. What changes is that "planning time" can now happen more than once per run: once at the start, and again if something goes wrong.
+
+The suspend/resume model (discussed in [Core Concepts](#2-suspend-and-resume)) is the foundation that makes this possible. Because execution state is fully serializable, it can be handed to the planner as context and then resumed from a checkpoint. The two features compose naturally.
+
+---
+
 ## Getting Started
 
 ### Build and Run

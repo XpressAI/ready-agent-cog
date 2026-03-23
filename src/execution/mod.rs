@@ -21,3 +21,5 @@ mod observer_tests;
 pub mod state;
 #[cfg(test)]
 mod state_tests;
+#[cfg(test)]
+mod state_context_tests;

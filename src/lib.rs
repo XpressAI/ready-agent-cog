@@ -14,6 +14,9 @@
 #[cfg(test)]
 pub mod test_helpers;
 
+#[cfg(test)]
+mod error_tests;
+
 /// Shared error types and result aliases used throughout the crate.
 pub mod error;
 /// Runtime execution, interpretation, and state-management components.

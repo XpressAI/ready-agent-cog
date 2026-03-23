@@ -181,6 +181,40 @@ executor.execute(&plan, HashMap::new(), Some(Box::new(|prompt: &str| {
 }))).await?;
 ```
 
+### Error recovery
+
+If execution fails with a recoverable runtime error, Ready can ask the planner for a continuation plan and resume from the last compatible checkpoint instead of restarting from step 1.
+
+Recoverable errors include execution-time failures such as [`ReadyError::Execution`](src/error.rs:15) and [`ReadyError::Tool`](src/error.rs:17). Structural failures such as [`ReadyError::PlanParsing`](src/error.rs:9), [`ReadyError::PlanValidation`](src/error.rs:11), and [`ReadyError::ToolNotFound`](src/error.rs:19) are not retried. The recoverability rule lives in [`ReadyError::is_recoverable()`](src/error.rs:55).
+
+CLI:
+
+```sh
+# Enable recovery with the default limit (3 attempts)
+ready run --sop process.sop --plan plan.json --recovery
+
+# Override the recovery attempt limit
+ready run --sop process.sop --plan plan.json --recovery --recovery-attempts 5
+```
+
+Library:
+
+```rust
+use std::collections::HashMap;
+use ready::workflow::{SopExecutor, SopPlanner};
+
+let recovery_planner = SopPlanner::new(llm, 3);
+
+let state = executor.execute_with_recovery(
+    &plan,
+    HashMap::new(),
+    Some(Box::new(recovery_planner)),
+    max_recovery_attempts,
+).await?;
+```
+
+Internally, [`SopPlanner::recover()`](src/workflow/planner.rs:178) receives the original process description, the original [`AbstractPlan`](src/plan/types.rs:22), the current [`ExecutionState`](src/execution/state.rs:159), and the error. [`ExecutionState::to_llm_context()`](src/execution/state.rs:204) truncates the state snapshot before it is sent to the model. [`SopExecutor::execute_with_recovery()`](src/workflow/executor.rs:175) coordinates retries, and [`SopExecutor::execute_from_checkpoint()`](src/workflow/executor.rs:227) resumes using the saved `ip_path` checkpoint rather than restarting from `current_step_index`.
+
 ### Custom tools
 
 Implement [`ToolsModule`](src/tools/traits.rs:1) to register your own tools:
@@ -251,6 +285,8 @@ The [`PlanInterpreter`](src/execution/interpreter.rs) runs the plan step-by-step
 **Plans are programs.** An [`AbstractPlan`](src/plan/types.rs) supports assignments, tool calls, conditionals, for/while loops, string concatenation, arithmetic, and nested attribute/index access. It's a program in a small, purpose-built language.
 
 **Suspend and resume.** When a tool needs human input or wants to pause, execution records a serializable [`ExecutionState`](src/execution/state.rs:159) and suspends. Hours or days later, you provide the input and execution resumes at the exact instruction pointer.
+
+**Adaptive error recovery.** With recovery enabled, Ready only re-engages the planner after recoverable runtime failures. It preserves prior progress, truncates state before handing it back to the model, and resumes from the saved checkpoint when the repaired continuation still aligns.
 
 **Plans as tools.** Plans can be [composed](src/tools/process.rs). One plan calls another as a tool.
 
@@ -400,12 +436,16 @@ def get_latest_transcripts() -> LatestTranscriptsResult:
 
 ```
 ready plan    --sop <file> [--output <file>] [--tools <file>] [--plans-dir <dir>] [--model <name>]
-ready run     [--sop <file>] [--plan <file>] [--tools <file>] [--plans-dir <dir>] [--model <name>] [--input NAME=VALUE ...]
+ready run     [--sop <file>] [--plan <file>] [--tools <file>] [--plans-dir <dir>] [--model <name>] [--input NAME=VALUE ...] [--recovery] [--recovery-attempts <n>]
 ready inspect --plan <file>
 ready tools   [--tools <file>] [--plans-dir <dir>]
 ```
 
 Use [`ready inspect`](src/main.rs) to see which `NAME` values are actually prefillable for a given plan before calling [`ready run`](src/main.rs) with [`--input NAME=VALUE`](src/main.rs:90). Values are parsed as JSON when possible, otherwise treated as plain strings.
+
+`--recovery` enables adaptive error recovery during [`ready run`](src/main.rs). When a recoverable runtime failure occurs, Ready asks the planner for a continuation plan and resumes from the last matching checkpoint.
+
+`--recovery-attempts <n>` sets the maximum number of recovery replans. The default is `3`.
 
 `--tools` points to a [`shell-tools.json`](src/tools/shell.rs) file. If omitted, Ready looks for `shell-tools.json` in the current directory.
 

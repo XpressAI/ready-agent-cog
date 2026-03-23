@@ -1,15 +1,18 @@
 //! LLM-powered plan generation from Standard Operating Procedure (SOP) text.
 
 use std::sync::Arc;
+use async_trait::async_trait;
 use tracing::{debug, trace, warn};
 
 use crate::error::{ReadyError, Result};
+use crate::execution::state::RecoveryContext;
 use crate::llm::client::strip_markdown_fences;
 use crate::llm::traits::LlmClient;
 use crate::plan::{AbstractPlan, DiagnosticSeverity};
 use crate::planning::parser::parse_python_to_plan;
 use crate::planning::validator::validate_plan;
 use crate::tools::models::{ToolDescription, generate_prompt_stubs};
+use crate::workflow::executor::RecoveryPlanner;
 
 const SYSTEM_TEMPLATE: &str = concat!(
     "You are an expert python developer. You are known for your ability to create code that is as simple as it gets.\n",
@@ -66,6 +69,20 @@ const DESCRIPTION_SYSTEM: &str = concat!(
     "- Mention the purpose of the plan.\n",
     "- If there are prefillable input variables, list them by name and their prompt so the caller knows what to prepare.\n",
     "- Do NOT include any code or markdown formatting — plain prose only."
+);
+
+const RECOVERY_SYSTEM: &str = concat!(
+    "You are helping recover from an execution error in a workflow plan.\n",
+    "Given the original SOP, the original plan, the current execution state, and the error that occurred,\n",
+    "generate a continuation plan that handles the error and allows execution to resume.\n\n",
+    "Rules:\n",
+    "- Analyze the error and determine what went wrong\n",
+    "- Generate a continuation plan that:\n",
+    "  1. Handles the error (e.g., retry with different params, use fallback, skip problematic step)\n",
+    "  2. Continues with remaining steps from the original plan\n",
+    "- The continuation plan should be a complete, valid plan that can execute independently\n",
+    "- Use the same tool functions as the original plan\n",
+    "- Output Python code only, following the same rules as the original plan"
 );
 
 const ERROR_SUFFIX_TEMPLATE: &str = concat!(
@@ -159,6 +176,69 @@ impl SopPlanner {
         Err(last_error.unwrap_or_else(|| {
             ReadyError::PlanValidation("SopPlanner exhausted retries without a result".to_string())
         }))
+    }
+
+    /// Generates a recovery plan from an execution error.
+    ///
+    /// This method creates a continuation plan that handles the error and
+    /// allows execution to resume. The continuation plan is a complete,
+    /// valid plan that can execute independently from the error checkpoint.
+    pub async fn recover(
+        &self,
+        sop_text: &str,
+        recovery_context: &crate::execution::state::RecoveryContext,
+        tool_descriptions: &[ToolDescription],
+    ) -> Result<AbstractPlan> {
+        let mut recovery_prompt = build_recovery_prompt(sop_text, recovery_context);
+
+        for attempt in 0..=self.max_retries {
+            debug!(attempt = attempt + 1, "requesting recovery plan from LLM");
+
+            let raw = self
+                .llm
+                .complete(RECOVERY_SYSTEM, &recovery_prompt)
+                .await?;
+            let code = strip_markdown_fences(&raw);
+
+            let plan = match parse_and_validate_plan(
+                &code,
+                &format!("{}_recovery", recovery_context.original_plan.name),
+                tool_descriptions,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    warn!(attempt = attempt + 1, error = %error, "recovery plan validation failed");
+                    if attempt < self.max_retries {
+                        // Retry with error context
+                        recovery_prompt = format!(
+                            "{}\n\n[Previous attempt failed: {}]\n\nBroken code:\n{}",
+                            recovery_prompt,
+                            &error,
+                            code
+                        );
+                        continue;
+                    }
+                    return Err(ReadyError::PlanValidation(error.to_string()));
+                }
+            };
+
+            debug!(plan_name = %plan.name, step_count = plan.steps.len(), "recovery planning completed");
+            return Ok(plan);
+        }
+
+        Err(ReadyError::PlanValidation("SopPlanner exhausted retries without a recovery result".to_string()))
+    }
+}
+
+#[async_trait]
+impl RecoveryPlanner for SopPlanner {
+    async fn recover(
+        &self,
+        sop_text: &str,
+        recovery_context: &RecoveryContext,
+        tool_descriptions: &[ToolDescription],
+    ) -> Result<AbstractPlan> {
+        self.recover(sop_text, recovery_context, tool_descriptions).await
     }
 }
 
@@ -257,4 +337,16 @@ fn infer_plan_name(sop_text: &str) -> String {
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .unwrap_or_else(|| "generated_plan".to_string())
+}
+
+fn build_recovery_prompt(
+    sop_text: &str,
+    recovery_context: &crate::execution::state::RecoveryContext,
+) -> String {
+    let context = recovery_context.to_llm_context(10, 500);
+    format!(
+        "Original SOP:\n{}\n\nRecovery Context:\n{}",
+        sop_text,
+        context
+    )
 }

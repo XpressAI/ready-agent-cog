@@ -92,6 +92,10 @@ enum Commands {
             help = "Pre-fill a plan input variable. May be repeated. VALUE accepts JSON, or plain text if JSON parsing fails."
         )]
         inputs: Vec<String>,
+        #[arg(long, help = "Enable automatic error recovery with LLM-assisted retries")]
+        recovery: bool,
+        #[arg(long, default_value = "3", help = "Maximum recovery attempts (default: 3)")]
+        recovery_attempts: usize,
     },
     /// Display a human-readable summary of a previously generated plan, including prefillable inputs.
     Inspect {
@@ -151,6 +155,8 @@ async fn run() -> Result<()> {
             plans_dir,
             model,
             inputs,
+            recovery,
+            recovery_attempts,
         } => {
             handle_run(
                 sop.as_deref(),
@@ -159,6 +165,8 @@ async fn run() -> Result<()> {
                 plans_dir.as_deref(),
                 model,
                 &inputs,
+                recovery,
+                recovery_attempts,
                 debug,
             )
             .await
@@ -215,20 +223,32 @@ async fn handle_run(
     plans_dir: Option<&str>,
     model: Option<String>,
     inputs: &[String],
+    recovery: bool,
+    recovery_attempts: usize,
     debug: bool,
 ) -> Result<()> {
     let llm = Arc::new(OpenAiClient::new(model, None, None));
     let registry = Arc::new(build_registry(llm.clone(), tools_path, plans_dir)?);
 
-    let plan = match (plan_path, sop_path) {
+    // Validate --sop is required for recovery mode
+    if recovery && sop_path.is_none() {
+        return Err(ReadyError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Recovery mode requires --sop to be provided",
+        )));
+    }
+
+    let (plan, sop_text) = match (plan_path, sop_path) {
         (Some(plan_path), _) => {
             debug_log(debug, format!("Loading plan from {plan_path}"));
-            load_plan(Path::new(plan_path))?
+            (load_plan(Path::new(plan_path))?, None)
         }
         (None, Some(sop_path)) => {
             let sop_path = PathBuf::from(sop_path);
             debug_log(debug, format!("Generating plan from SOP {}", sop_path.display()));
-            generate_plan(llm, registry.as_ref(), &sop_path).await?
+            let sop_text = fs::read_to_string(&sop_path)?;
+            let plan = generate_plan(llm.clone(), registry.as_ref(), &sop_path).await?;
+            (plan, Some(sop_text))
         }
         (None, None) => {
             return Err(ReadyError::Io(io::Error::new(
@@ -249,10 +269,34 @@ async fn handle_run(
         );
     }
 
-    let executor = SopExecutor::new(registry, Some(Arc::new(LoggingObserver)));
-    let state = executor
-        .execute(&plan, initial_inputs, Some(Box::new(prompt_for_input)))
-        .await?;
+    let executor = SopExecutor::new(registry.clone(), Some(Arc::new(LoggingObserver)));
+    
+    // Execute with or without recovery
+    let state = if recovery {
+        let Some(sop) = sop_text else {
+            return Err(ReadyError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Recovery mode requires --sop to be provided",
+            )));
+        };
+        
+        let planner = SopPlanner::new(llm.clone(), 3);
+        executor
+            .execute_with_recovery(
+                &plan,
+                initial_inputs,
+                Some(Box::new(prompt_for_input)),
+                &planner,
+                &sop,
+                registry.as_ref().tools().as_slice(),
+                recovery_attempts,
+            )
+            .await?
+    } else {
+        executor
+            .execute(&plan, initial_inputs, Some(Box::new(prompt_for_input)))
+            .await?
+    };
 
     if debug {
         debug!(

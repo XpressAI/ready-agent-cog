@@ -54,6 +54,24 @@ pub enum ReadyError {
     Http(#[from] reqwest::Error),
 }
 
+impl ReadyError {
+    /// Determines if an error can be recovered from via LLM planning.
+    ///
+    /// Recoverable errors are runtime execution errors where the plan structure
+    /// is valid but execution failed (e.g., tool returned unexpected result).
+    ///
+    /// Unrecoverable errors include:
+    /// - ToolNotFound: The tool doesn't exist, can't recover
+    /// - PlanParsing: The plan is invalid, can't recover
+    /// - PlanValidation: The plan failed validation, can't recover
+    pub fn is_recoverable(&self) -> bool {
+        matches!(
+            self,
+            ReadyError::Execution { .. } | ReadyError::Tool { .. }
+        )
+    }
+}
+
 /// A crate-wide convenience alias for results that return [`ReadyError`].
 ///
 /// This keeps public APIs concise while ensuring failures consistently use the

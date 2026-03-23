@@ -217,3 +217,79 @@ impl ExecutionError {
         }
     }
 }
+
+impl ExecutionState {
+    /// Converts execution state to a string suitable for LLM context.
+    ///
+    /// Truncates variables to avoid overloading the LLM.
+    /// Uses ip_path for accurate position tracking (not current_step_index).
+    pub fn to_llm_context(&self, max_vars: usize) -> String {
+        let ip = format!("{:?}", self.interpreter_state.ip_path);
+        let vars: Vec<_> = self
+            .interpreter_state
+            .variables
+            .iter()
+            .take(max_vars)
+            .map(|(k, v)| format!("{}: {:?}", k, v))
+            .collect();
+        format!(
+            "Position (ip_path): {}\nVariables ({} shown): [{}]",
+            ip,
+            vars.len(),
+            vars.join(", ")
+        )
+    }
+}
+
+impl ExecutionError {
+    /// Converts execution error to a string suitable for LLM context.
+    ///
+    /// Truncates the message to avoid overloading the LLM.
+    pub fn to_llm_context(&self, max_len: usize) -> String {
+        let message = self.message.chars().take(max_len).collect::<String>();
+        format!(
+            "Error at step {}: {} - {}",
+            self.step_index.unwrap_or(0),
+            self.exception_type,
+            message
+        )
+    }
+}
+
+/// Context for error recovery planning.
+///
+/// This struct bundles the information needed to generate a recovery plan:
+/// - The original plan that failed
+/// - The execution state at the point of failure
+/// - The error that occurred
+#[derive(Debug, Clone)]
+pub struct RecoveryContext {
+    pub original_plan: crate::plan::AbstractPlan,
+    pub current_state: ExecutionState,
+    pub error: ExecutionError,
+}
+
+impl RecoveryContext {
+    /// Creates a recovery context from execution state and error.
+    pub fn new(
+        plan: crate::plan::AbstractPlan,
+        state: ExecutionState,
+        error: ExecutionError,
+    ) -> Self {
+        Self {
+            original_plan: plan,
+            current_state: state,
+            error,
+        }
+    }
+
+    /// Converts the recovery context to a string suitable for LLM prompt.
+    pub fn to_llm_context(&self, max_vars: usize, max_error_len: usize) -> String {
+        format!(
+            "Original Plan: {}\n\nState at Error:\n{}\n\nError:\n{}",
+            self.original_plan.name,
+            self.current_state.to_llm_context(max_vars),
+            self.error.to_llm_context(max_error_len)
+        )
+    }
+}

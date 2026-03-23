@@ -217,3 +217,219 @@ fn parse_and_validate_plan_reports_validation_errors_without_llm_flow() {
         matches!(error, ReadyError::PlanValidation(message) if message.contains("undefined_var"))
     );
 }
+
+// Recovery tests
+use crate::execution::state::{ExecutionError, ExecutionState, RecoveryContext};
+use crate::plan::AbstractPlan;
+
+#[tokio::test]
+async fn recover_generates_continuation_plan() {
+    let recovery_code = "def main():\n    # Handle error and continue\n    data = read_file(\"report.txt\")\n    post_to_slack(data)";
+    let (planner, calls) = planner_with_responses(vec![recovery_code], 3);
+
+    let original_plan = AbstractPlan {
+        name: "original_plan".to_string(),
+        description: "Original plan".to_string(),
+        steps: vec![],
+        code: "def main():\n    pass".to_string(),
+    };
+
+    let state = ExecutionState::default();
+    let error = ExecutionError {
+        step_index: Some(5),
+        step_type: Some("tool_call".to_string()),
+        exception_type: "ToolError".to_string(),
+        message: "Connection timeout".to_string(),
+    };
+
+    let recovery_context = RecoveryContext::new(original_plan, state, error);
+
+    let plan = planner
+        .recover("Read a report and post it to Slack", &recovery_context, &sample_tools())
+        .await
+        .expect("recovery should succeed");
+
+    assert!(plan.name.contains("recovery"));
+    assert_eq!(plan.code, recovery_code);
+    assert_eq!(plan.steps.len(), 2);
+
+    let llm_calls = calls.lock().expect("calls mutex poisoned");
+    assert_eq!(llm_calls.len(), 1);
+    assert!(llm_calls[0].0.contains("recover"));
+    assert!(llm_calls[0].1.contains("Original Plan: original_plan"));
+    assert!(llm_calls[0].1.contains("State at Error:"));
+    assert!(llm_calls[0].1.contains("Error:"));
+}
+
+#[tokio::test]
+async fn recover_retries_after_parse_error() {
+    let valid_code = "def main():\n    data = read_file(\"report.txt\")\n    post_to_slack(data)";
+    let (planner, calls) = planner_with_responses(vec!["def main(\n    broken", valid_code], 3);
+
+    let original_plan = AbstractPlan {
+        name: "original_plan".to_string(),
+        description: "Original plan".to_string(),
+        steps: vec![],
+        code: "def main():\n    pass".to_string(),
+    };
+
+    let state = ExecutionState::default();
+    let error = ExecutionError {
+        step_index: Some(5),
+        step_type: Some("tool_call".to_string()),
+        exception_type: "ToolError".to_string(),
+        message: "Connection timeout".to_string(),
+    };
+
+    let recovery_context = RecoveryContext::new(original_plan, state, error);
+
+    let plan = planner
+        .recover("Read a report", &recovery_context, &sample_tools())
+        .await
+        .expect("retry should recover");
+
+    assert_eq!(plan.code, valid_code);
+
+    let llm_calls = calls.lock().expect("calls mutex poisoned");
+    assert_eq!(llm_calls.len(), 2);
+    assert!(llm_calls[1].1.contains("Previous attempt failed"));
+}
+
+#[tokio::test]
+async fn recover_retries_after_validation_error() {
+    let valid_code = "def main():\n    data = read_file(\"report.txt\")\n    post_to_slack(data)";
+    let (planner, calls) = planner_with_responses(
+        vec![
+            "def main():\n    post_to_slack(undefined_var)",
+            valid_code,
+        ],
+        3,
+    );
+
+    let original_plan = AbstractPlan {
+        name: "original_plan".to_string(),
+        description: "Original plan".to_string(),
+        steps: vec![],
+        code: "def main():\n    pass".to_string(),
+    };
+
+    let state = ExecutionState::default();
+    let error = ExecutionError {
+        step_index: Some(5),
+        step_type: Some("tool_call".to_string()),
+        exception_type: "ToolError".to_string(),
+        message: "Connection timeout".to_string(),
+    };
+
+    let recovery_context = RecoveryContext::new(original_plan, state, error);
+
+    let plan = planner
+        .recover("Read a report", &recovery_context, &sample_tools())
+        .await
+        .expect("retry should recover");
+
+    assert_eq!(plan.steps.len(), 2);
+    assert_eq!(calls.lock().expect("calls mutex poisoned").len(), 2);
+}
+
+#[tokio::test]
+async fn recover_fails_after_max_retries() {
+    let (planner, _) = planner_with_responses(vec!["def main(\n    broken"], 2);
+
+    let original_plan = AbstractPlan {
+        name: "original_plan".to_string(),
+        description: "Original plan".to_string(),
+        steps: vec![],
+        code: "def main():\n    pass".to_string(),
+    };
+
+    let state = ExecutionState::default();
+    let error = ExecutionError {
+        step_index: Some(5),
+        step_type: Some("tool_call".to_string()),
+        exception_type: "ToolError".to_string(),
+        message: "Connection timeout".to_string(),
+    };
+
+    let recovery_context = RecoveryContext::new(original_plan, state, error);
+
+    let result = planner
+        .recover("Read a report", &recovery_context, &sample_tools())
+        .await;
+
+    assert!(result.is_err());
+}
+
+// RecoveryPlanner trait implementation tests
+use crate::workflow::executor::RecoveryPlanner;
+
+#[tokio::test]
+async fn sop_planner_implements_recovery_planner_trait() {
+    let recovery_code = "def main():\n    data = read_file(\"report.txt\")\n    post_to_slack(data)";
+    let (planner, calls) = planner_with_responses(vec![recovery_code], 3);
+
+    let original_plan = AbstractPlan {
+        name: "original_plan".to_string(),
+        description: "Original plan".to_string(),
+        steps: vec![],
+        code: "def main():\n    pass".to_string(),
+    };
+
+    let state = ExecutionState::default();
+    let error = ExecutionError {
+        step_index: Some(5),
+        step_type: Some("tool_call".to_string()),
+        exception_type: "ToolError".to_string(),
+        message: "Connection timeout".to_string(),
+    };
+
+    let recovery_context = RecoveryContext::new(original_plan, state, error);
+
+    // Test that SopPlanner implements RecoveryPlanner trait
+    let plan = planner
+        .recover("Read a report and post it to Slack", &recovery_context, &sample_tools())
+        .await
+        .expect("recovery should succeed via trait");
+
+    assert!(plan.name.contains("recovery"));
+    assert_eq!(plan.code, recovery_code);
+
+    let llm_calls = calls.lock().expect("calls mutex poisoned");
+    assert_eq!(llm_calls.len(), 1);
+}
+
+#[tokio::test]
+async fn sop_planner_trait_can_be_used_as_dyn_recovery_planner() {
+    let recovery_code = "def main():\n    data = read_file(\"report.txt\")\n    post_to_slack(data)";
+    let (planner, calls) = planner_with_responses(vec![recovery_code], 3);
+
+    let original_plan = AbstractPlan {
+        name: "original_plan".to_string(),
+        description: "Original plan".to_string(),
+        steps: vec![],
+        code: "def main():\n    pass".to_string(),
+    };
+
+    let state = ExecutionState::default();
+    let error = ExecutionError {
+        step_index: Some(5),
+        step_type: Some("tool_call".to_string()),
+        exception_type: "ToolError".to_string(),
+        message: "Connection timeout".to_string(),
+    };
+
+    let recovery_context = RecoveryContext::new(original_plan, state, error);
+
+    // Test that SopPlanner can be used as &dyn RecoveryPlanner
+    let planner_ref: &dyn RecoveryPlanner = &planner;
+    let plan = planner_ref
+        .recover("Read a report and post it to Slack", &recovery_context, &sample_tools())
+        .await
+        .expect("recovery should succeed via trait object");
+
+    assert!(plan.name.contains("recovery"));
+    assert_eq!(plan.code, recovery_code);
+
+    let llm_calls = calls.lock().expect("calls mutex poisoned");
+    assert_eq!(llm_calls.len(), 1);
+}

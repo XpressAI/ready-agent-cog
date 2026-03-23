@@ -11,6 +11,7 @@ use crate::execution::interpreter::PlanInterpreter;
 use crate::execution::observer::{ExecutionObserver, NoOpObserver};
 use crate::execution::state::{ExecutionState, ExecutionStatus};
 use crate::plan::AbstractPlan;
+use crate::tools::models::ToolDescription;
 use crate::tools::registry::InMemoryToolRegistry;
 
 type SuspendCallback = dyn Fn(&str) -> Option<String> + Send + Sync;
@@ -165,4 +166,118 @@ impl SopExecutor {
             )
             .await
     }
+
+    /// Executes a plan with automatic error recovery.
+    ///
+    /// On execution error, if the error is recoverable and recovery attempts remain,
+    /// this method calls the planner to generate a recovery plan and executes it
+    /// from the error checkpoint.
+    pub async fn execute_with_recovery(
+        &self,
+        plan: &AbstractPlan,
+        initial_inputs: HashMap<String, Value>,
+        on_suspend: Option<Box<SuspendCallback>>,
+        planner: &dyn RecoveryPlanner,
+        sop_text: &str,
+        tool_descriptions: &[ToolDescription],
+        max_recovery_attempts: usize,
+    ) -> Result<ExecutionState> {
+        let mut state = self.execute(plan, initial_inputs, on_suspend).await?;
+
+        let mut recovery_attempts = 0;
+        while state.status == ExecutionStatus::Failed && recovery_attempts < max_recovery_attempts {
+            let Some(error) = state.error.clone() else {
+                break;
+            };
+
+            // Execution errors are always recoverable by definition.
+            // The error type is already known to be Execution since it comes from ExecutionState.
+            // We proceed with recovery for all execution errors.
+            recovery_attempts += 1;
+
+            // Generate recovery context
+            let recovery_context = crate::execution::state::RecoveryContext::new(
+                plan.clone(),
+                state.clone(),
+                error,
+            );
+
+            // Generate recovery plan
+            let recovery_plan = planner
+                .recover(sop_text, &recovery_context, tool_descriptions)
+                .await?;
+
+            // Execute recovery plan from checkpoint (no suspension handling during recovery)
+            state = self
+                .execute_from_checkpoint(&recovery_plan, &state, None)
+                .await?;
+        }
+
+        Ok(state)
+    }
+
+    /// Executes a plan from a checkpoint state.
+    ///
+    /// This method initializes execution from an existing state (e.g., after an error),
+    /// preserving variables and position from the checkpoint.
+    async fn execute_from_checkpoint(
+        &self,
+        plan: &AbstractPlan,
+        checkpoint: &ExecutionState,
+        on_suspend: Option<Box<SuspendCallback>>,
+    ) -> Result<ExecutionState> {
+        // Start from checkpoint state
+        let mut state = checkpoint.clone();
+        state.status = ExecutionStatus::Running;
+        state.error = None;
+
+        // Execute the recovery plan
+        self.runner
+            .execute(
+                self.registry.clone(),
+                self.observer.clone(),
+                plan,
+                &mut state,
+            )
+            .await?;
+
+        // Handle suspension if needed
+        while state.status == ExecutionStatus::Suspended {
+            let Some(callback) = on_suspend.as_ref() else {
+                break;
+            };
+
+            let reason = state
+                .suspension_reason
+                .as_deref()
+                .unwrap_or("User input required");
+
+            let Some(value) = callback(reason) else {
+                break;
+            };
+
+            self.runner
+                .provide_input(
+                    self.registry.clone(),
+                    self.observer.clone(),
+                    plan,
+                    &mut state,
+                    Value::String(value),
+                )
+                .await?;
+        }
+
+        Ok(state)
+    }
+}
+
+/// Trait for recovery planning, allowing mock implementations in tests.
+#[async_trait]
+pub trait RecoveryPlanner: Send + Sync {
+    async fn recover(
+        &self,
+        sop_text: &str,
+        recovery_context: &crate::execution::state::RecoveryContext,
+        tool_descriptions: &[ToolDescription],
+    ) -> Result<AbstractPlan>;
 }
