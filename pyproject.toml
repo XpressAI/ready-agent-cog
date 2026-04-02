@@ -1,0 +1,36 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ready-agent"
+description = "A plan-based agent execution engine for parsing, validating, and running deterministic workflows from plain-English SOPs."
+dynamic = ["version"]
+requires-python = ">=3.9"
+license = "GPL-3.0-or-later"
+keywords = ["agent", "llm", "workflow", "sop", "plan"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "Cargo.toml"
+module-name = "ready_agent"
+python-source = "python"
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

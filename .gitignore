@@ -12,6 +12,14 @@
 .DS_Store
 Thumbs.db
 
+# Python
+__pycache__/
+*.egg-info/
+dist/
+*.whl
+*.so
+*.pyd
+
 # Test / temp
 .coverage
 temp/
