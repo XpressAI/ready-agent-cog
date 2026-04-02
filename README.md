@@ -74,8 +74,26 @@ When the planner emits [`collect_user_input`](src/workflow/planner.rs:53), it wr
 
 ## Installation
 
+### From PyPI (recommended)
+
+```sh
+pip install ready-agent
+```
+
+This installs a prebuilt binary — no Rust toolchain needed.
+
+### From source
+
 ```sh
 cargo install --path .
+```
+
+### Development build
+
+```sh
+pip install "maturin[patchelf]"
+maturin develop          # builds and installs into current venv
+maturin build --release  # builds a wheel in target/wheels/
 ```
 
 Requires an OpenAI-compatible API:

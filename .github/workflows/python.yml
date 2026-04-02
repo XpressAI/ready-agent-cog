@@ -23,15 +23,19 @@ jobs:
 
   test-python:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: pip install maturin pytest
-      - run: maturin develop
-      - run: pytest python/tests/ -v
+          python-version: ${{ matrix.python-version }}
+      - run: python -m venv .venv
+      - run: .venv/bin/pip install "maturin[patchelf]" pytest
+      - run: .venv/bin/maturin develop
+      - run: .venv/bin/pytest python/tests/ -v
 
   build-wheels:
     needs: [test-rust, test-python]
